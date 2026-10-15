@@ -30,10 +30,10 @@ docker compose exec be npm run seed
 ```
 
 **Option B (production):** insert the admin row directly. Hash the password with the backend's own
-hashing library (run inside the `be` container, so it matches what login checks):
+hashing library, `bcryptjs` (run inside the `be` container, so it matches what login checks).
+Once the backend ships `npm run create-admin`, use that instead.
 ```sh
-# argon2 (swap for bcrypt's `hash(pw, 12)` if the backend uses bcrypt)
-HASH=$(docker compose exec -T be node -e "require('argon2').hash(process.argv[1]).then(console.log)" 'S3cure-Passw0rd')
+HASH=$(docker compose exec -T be node -e "require('bcryptjs').hash(process.argv[1], 12).then(console.log)" 'S3cure-Passw0rd')
 docker compose exec -T postgres psql -U asana -d asana -c \
   "INSERT INTO \"User\" (id, email, name, \"passwordHash\", role, \"isActive\", \"avatarColor\", \"createdAt\")
    VALUES (gen_random_uuid(), 'you@company.com', 'Your Name', '$HASH', 'ADMIN', true, '#6366f1', now());"
