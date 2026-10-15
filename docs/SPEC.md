@@ -224,3 +224,12 @@ Admin `admin@example.com` / `password123`; members `alice@example.com`, `bob@exa
   has no access).
 - Keep processes lean — the box has little free RAM. Don't leave watchers/dev servers running
   when not needed; one dev server per worker max.
+
+## 9. Build & deployment conventions (BE)
+The platform session writes the Dockerfile and CI against these, so keep to them:
+- package.json scripts: `build` (tsc → `dist/`), `start` = `node dist/server.js`, `typecheck`, `lint`, `test` (vitest), `seed`.
+- Prisma schema at `prisma/schema.prisma`; `prisma` goes in `dependencies` (runtime image runs `prisma migrate deploy`).
+- Env: `DATABASE_URL`, `TEST_DATABASE_URL`, `JWT_SECRET`, `APP_URL`, `PORT=3000`, `HOST=0.0.0.0`, `NODE_ENV`.
+- `GET /health` → `{ok:true}` on :3000 (outside `/api/v1`). FE nginx proxies `/api/` and `/health` to `be:3000`.
+- Dev DBs: `postgresql://postgres:postgres@localhost:5433/asana` and `.../asana_test` (already running).
+- Run heavy commands via `/home/claude/projects/asana-clone/heavy.sh <cmd>` (shared lock; low RAM).
