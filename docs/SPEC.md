@@ -45,8 +45,9 @@ docker-compose (postgres + be + fe/nginx).
 - Auth: cookie `sid` (httpOnly, SameSite=Lax, Secure in prod) holding a signed JWT (7d).
   Every endpoint except `/auth/login`, `/auth/accept-invite`, `/health` requires auth → `401`.
 - List responses: `{ "data": [...] }`. Single resources: the object itself.
-- Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "GONE" | "INTERNAL", "message": string, "details"?: any } }`
-  with matching HTTP status (404/400/401/403/409/410/500). `GONE` = used or expired invite.
+- Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "GONE" | "RATE_LIMITED" | "INTERNAL", "message": string, "details"?: any } }`
+  with matching HTTP status (404/400/401/403/409/410/429/500). `GONE` = used or expired invite; `RATE_LIMITED` = too many login / accept-invite attempts.
+- `POST` endpoints that create a resource return `201` (FE: treat any 2xx as success)..
 - Ordering uses float `position`. Clients compute a position between neighbours
   (`(prev+next)/2`, or `last+1000` when appending). Server may renormalise.
 - `PATCH` accepts any subset of the writable fields; `null` clears a nullable field.
@@ -174,12 +175,12 @@ type Notification = {
 | Method | Path | Body / Query | Returns |
 |---|---|---|---|
 | GET | `/projects` | `?teamId=&archived=false&q=` (visible only) | `{data: Project[]}` |
-| POST | `/projects` | `{teamId, name, description?, color?, privacy?='TEAM', defaultView?='LIST'}` creates sections "To do","In progress","Done"; creator = OWNER | `ProjectDetail` |
+| POST | `/projects` | `{teamId, name, description?, color?, privacy?='TEAM', defaultView?='LIST'}` creates sections "To do","In progress","Done"; creator = OWNER. Caller must be a member of the team (ADMIN exempt) → else `403` | `ProjectDetail` |
 | GET | `/projects/:id` | | `ProjectDetail` |
 | PATCH | `/projects/:id` | `{name?, description?, color?, privacy?, archived?, defaultView?}` | `ProjectDetail` |
 | DELETE | `/projects/:id` | | `204` |
 | POST | `/projects/:id/members` | `{userId, role}` | `ProjectDetail` |
-| PATCH | `/projects/:id/members/:userId` | `{role}` | `ProjectDetail` |
+| PATCH | `/projects/:id/members/:userId` | `{role}` — demoting/removing the last OWNER → `409` | `ProjectDetail` |
 | DELETE | `/projects/:id/members/:userId` | | `ProjectDetail` |
 | POST | `/projects/:id/sections` | `{name, position?}` | `Section` |
 | PATCH | `/sections/:id` | `{name?, position?}` | `Section` |
