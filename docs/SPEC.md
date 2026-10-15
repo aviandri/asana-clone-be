@@ -45,8 +45,8 @@ docker-compose (postgres + be + fe/nginx).
 - Auth: cookie `sid` (httpOnly, SameSite=Lax, Secure in prod) holding a signed JWT (7d).
   Every endpoint except `/auth/login`, `/auth/accept-invite`, `/health` requires auth → `401`.
 - List responses: `{ "data": [...] }`. Single resources: the object itself.
-- Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "INTERNAL", "message": string, "details"?: any } }`
-  with matching HTTP status (404/400/401/403/409/500).
+- Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "GONE" | "INTERNAL", "message": string, "details"?: any } }`
+  with matching HTTP status (404/400/401/403/409/410/500). `GONE` = used or expired invite.
 - Ordering uses float `position`. Clients compute a position between neighbours
   (`(prev+next)/2`, or `last+1000` when appending). Server may renormalise.
 - `PATCH` accepts any subset of the writable fields; `null` clears a nullable field.
@@ -162,7 +162,7 @@ type Notification = {
 ### Teams
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/teams` | `?mine=true` | `{data: Team[]}` |
+| GET | `/teams` | `?mine=true` (omit = all teams in the workspace) | `{data: Team[]}` |
 | POST | `/teams` | `{name, description?}` (creator becomes member) | `TeamDetail` |
 | GET | `/teams/:id` | | `TeamDetail` |
 | PATCH | `/teams/:id` | `{name?, description?}` (team member or ADMIN) | `TeamDetail` |
