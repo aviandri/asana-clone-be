@@ -21,6 +21,8 @@ export default defineConfig({
       TEST_DATABASE_URL,
       JWT_SECRET: 'test-secret-test-secret-test-secret',
       APP_URL: 'http://localhost:5173',
+      // Tests log in many times from one IP; the limiter has its own test with a low max.
+      AUTH_RATE_LIMIT_MAX: '10000',
     },
   },
 });

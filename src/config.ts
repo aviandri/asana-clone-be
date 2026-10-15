@@ -8,6 +8,8 @@ const EnvSchema = z.object({
   APP_URL: z.string().url().default('http://localhost:5173'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
+  /** Per-IP attempts per minute on POST /auth/login and /auth/accept-invite. */
+  AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

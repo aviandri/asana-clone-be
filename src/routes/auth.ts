@@ -14,7 +14,12 @@ const AcceptInviteBody = z.object({
 const TokenParams = z.object({ token: z.string().min(1) });
 
 export default async function authRoutes(app: FastifyInstance) {
-  app.post('/login', { config: { public: true } }, async (req, reply) => {
+  const limited = {
+    public: true,
+    rateLimit: { max: app.config.AUTH_RATE_LIMIT_MAX, timeWindow: '1 minute' },
+  };
+
+  app.post('/login', { config: limited }, async (req, reply) => {
     const body = parse(LoginBody, req.body);
     const user = await app.db.user.findUnique({ where: { email: body.email } });
     const ok = await verifyPassword(body.password, user?.passwordHash ?? DUMMY_HASH);
@@ -45,7 +50,7 @@ export default async function authRoutes(app: FastifyInstance) {
     return { email: invite.email, role: invite.role };
   });
 
-  app.post('/accept-invite', { config: { public: true } }, async (req, reply) => {
+  app.post('/accept-invite', { config: limited }, async (req, reply) => {
     const body = parse(AcceptInviteBody, req.body);
     const invite = await findUsableInvite(body.token);
     if (await app.db.user.findUnique({ where: { email: invite.email } })) {
