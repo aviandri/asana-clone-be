@@ -170,6 +170,17 @@ describe('members', () => {
     expect((await get(`/api/v1/projects/${p.id}`, outsider)).statusCode).toBe(404);
   });
 
+  it('moves Project.owner to a remaining OWNER when the owner steps down', async () => {
+    const p = await createProject();
+    const url = `/api/v1/projects/${p.id}/members`;
+    const headers = { cookie: owner.cookie };
+    await ctx.app.inject({ method: 'POST', url, headers, payload: { userId: teammate.user.id, role: 'OWNER' } });
+    const res = await ctx.app.inject({ method: 'PATCH', url: `${url}/${owner.user.id}`, headers, payload: { role: 'EDITOR' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().owner.id).toBe(teammate.user.id);
+    expect(res.json().myRole).toBe('EDITOR');
+  });
+
   it('forbids non-owners from managing members', async () => {
     const p = await createProject();
     const res = await ctx.app.inject({

@@ -139,6 +139,19 @@ export default async function projectRoutes(app: FastifyInstance) {
     }
   }
 
+  /** Keeps Project.owner pointing at a current OWNER member after roles change. */
+  async function syncOwner(projectId: string) {
+    const project = await app.db.project.findUniqueOrThrow({ where: { id: projectId }, select: { ownerId: true } });
+    const owners = await app.db.projectMember.findMany({
+      where: { projectId, role: 'OWNER' },
+      select: { userId: true },
+      orderBy: { user: { name: 'asc' } },
+    });
+    if (owners.length > 0 && !owners.some((o) => o.userId === project.ownerId)) {
+      await app.db.project.update({ where: { id: projectId }, data: { ownerId: owners[0]!.userId } });
+    }
+  }
+
   app.patch('/projects/:id/members/:userId', async (req) => {
     const { id, userId } = parse(MemberParams, req.params);
     const { role } = parse(UpdateMemberBody, req.body);
@@ -147,6 +160,7 @@ export default async function projectRoutes(app: FastifyInstance) {
     if (!member) throw notFound('Project member');
     if (member.role === 'OWNER' && role !== 'OWNER') await assertKeepsAnOwner(id, userId);
     await app.db.projectMember.update({ where: { projectId_userId: { projectId: id, userId } }, data: { role } });
+    await syncOwner(id);
     return loadProjectDetail(app.db, id, req.user.id);
   });
 
@@ -157,6 +171,7 @@ export default async function projectRoutes(app: FastifyInstance) {
     if (!member) throw notFound('Project member');
     if (member.role === 'OWNER') await assertKeepsAnOwner(id, userId);
     await app.db.projectMember.delete({ where: { projectId_userId: { projectId: id, userId } } });
+    await syncOwner(id);
     return loadProjectDetail(app.db, id, req.user.id);
   });
 
