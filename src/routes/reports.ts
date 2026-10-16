@@ -124,7 +124,7 @@ export default async function reportRoutes(app: FastifyInstance) {
           const u = assigneeId ? users.get(assigneeId) : undefined;
           return { assignee: u ? toUserSummary(u) : null, ...c };
         })
-        .sort((x, y) => y.incomplete - x.incomplete || (x.assignee?.name ?? '￿').localeCompare(y.assignee?.name ?? '￿')),
+        .sort((x, y) => y.incomplete - x.incomplete || (x.assignee?.name ?? '\uffff').localeCompare(y.assignee?.name ?? '\uffff')),
       byPriority: PRIORITY_ORDER.map((priority) => ({ priority, ...byPriority.get(priority)! })),
       trend: weeklyTrend(dated, mondayOf(today), weeks),
       upcoming: upcoming.map(toTask),

@@ -5,7 +5,7 @@
  */
 
 /** UTF-8 byte order mark, so Excel opens non-ASCII names (e.g. Indonesian) correctly. */
-export const UTF8_BOM = '﻿';
+export const UTF8_BOM = '\uFEFF';
 
 const FORMULA_START = /^[=+\-@\t\r]/;
 const NEEDS_QUOTES = /[",\r\n]/;
@@ -26,7 +26,7 @@ export function toCsv(header: string[], rows: (string | number | boolean | null 
 export function slugify(name: string, fallback = 'project'): string {
   const slug = name
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
