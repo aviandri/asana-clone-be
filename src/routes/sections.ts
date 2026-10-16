@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { notFound } from '../errors.js';
 import { assertCanEdit, projectAccess } from '../lib/access.js';
+import { renormaliseSections } from '../lib/positions.js';
 import { toSection } from '../lib/projects.js';
 import { idParams, parse } from '../lib/validate.js';
 
@@ -26,7 +27,13 @@ export default async function sectionRoutes(app: FastifyInstance) {
     const { id } = parse(idParams, req.params);
     const body = parse(UpdateBody, req.body);
     await editableSection(req, id);
-    return toSection(await app.db.section.update({ where: { id }, data: body }));
+    const section = await app.db.$transaction(async (tx) => {
+      const updated = await tx.section.update({ where: { id }, data: body });
+      if (body.position === undefined) return updated;
+      await renormaliseSections(tx, updated);
+      return tx.section.findUniqueOrThrow({ where: { id } });
+    });
+    return toSection(section);
   });
 
   app.delete('/sections/:id', async (req, reply) => {

@@ -377,3 +377,49 @@ describe('followers', () => {
     expect(removed.followers.map((f: { name: string }) => f.name)).toEqual(['Alice']);
   });
 });
+
+describe('position renormalisation', () => {
+  it('renumbers a task sibling group when a move lands within 1e-6 of a neighbour, keeping order', async () => {
+    const sectionId = project.sections[0]!.id;
+    await createTask({ title: 'A', sectionId, position: 1 });
+    await createTask({ title: 'B', sectionId, position: 2 });
+    const c = await createTask({ title: 'C', sectionId, position: 3 });
+    const other = await createTask({ title: 'Other section', sectionId: project.sections[1]!.id, position: 5 });
+
+    // What ~20 midpoint drops between A and B produce: a position within 1e-6 of A.
+    const res = await req(alice, 'PATCH', `/tasks/${c.id}`, { position: 1 + 5e-7 });
+    expect(res.statusCode).toBe(200);
+    // C sat just above A, so the order is A, C, B.
+    expect(res.json().position).toBe(2000);
+    const list = (await req(alice, 'GET', `/projects/${project.id}/tasks`)).json().data;
+    const inSection = list.filter((t: { sectionId: string }) => t.sectionId === sectionId);
+    expect(inSection.map((t: { title: string; position: number }) => [t.title, t.position])).toEqual([
+      ['A', 1000],
+      ['C', 2000],
+      ['B', 3000],
+    ]);
+    // Other groups are untouched.
+    expect((await prisma.task.findUniqueOrThrow({ where: { id: other.id } })).position).toBe(5);
+  });
+
+  it('leaves positions alone when the gap is still healthy', async () => {
+    const sectionId = project.sections[0]!.id;
+    await createTask({ title: 'A', sectionId, position: 1 });
+    const b = await createTask({ title: 'B', sectionId, position: 2 });
+    const res = await req(alice, 'PATCH', `/tasks/${b.id}`, { position: 1.5 });
+    expect(res.json().position).toBe(1.5);
+  });
+
+  it('renumbers a project’s sections when a section move collides', async () => {
+    const [todo, doing, done] = project.sections as { id: string }[];
+    const res = await req(alice, 'PATCH', `/sections/${done!.id}`, { position: 1000 + 1e-7 });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().position).toBe(2000);
+    const sections = (await req(alice, 'GET', `/projects/${project.id}`)).json().sections;
+    expect(sections.map((s: { id: string; position: number }) => [s.id, s.position])).toEqual([
+      [todo!.id, 1000],
+      [done!.id, 2000],
+      [doing!.id, 3000],
+    ]);
+  });
+});

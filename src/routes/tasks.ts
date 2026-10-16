@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { forbidden, notFound, validation } from '../errors.js';
 import { assertCanEdit, projectAccess } from '../lib/access.js';
 import { follow, notify, notifyFollowers, recordActivity } from '../lib/events.js';
+import { renormaliseTaskSiblings } from '../lib/positions.js';
 import { POSITION_STEP } from '../lib/projects.js';
 import { fromDateOnly, toDateOnly } from '../lib/serialize.js';
 import {
@@ -56,10 +57,19 @@ type Placement = { projectId: string | null; sectionId: string | null; parentId:
 export default async function taskRoutes(app: FastifyInstance) {
   const db = app.db;
 
-  async function activeUser(id: string) {
-    const user = await db.user.findUnique({ where: { id }, select: { id: true, isActive: true } });
+  /**
+   * The user someone wants to assign or add as a follower: must exist, be active and be able to see
+   * the project. Otherwise they'd get notifications about a task they can't open. (Asana shares the
+   * project automatically instead; v1 rejects.)
+   */
+  async function assertCanBeInvolved(userId: string, projectId: string | null, field: 'assigneeId' | 'userId') {
+    const user = await db.user.findUnique({ where: { id: userId } });
     if (!user || !user.isActive) throw notFound('User');
-    return user.id;
+    if (!projectId) return;
+    const visible = await projectAccess(db, user, projectId).then(() => true, () => false);
+    if (!visible) {
+      throw validation('User has no access to this project', [{ path: [field], message: 'No access to this project' }]);
+    }
   }
 
   /** The caller must be able to edit tasks in the given project (404 if invisible, 403 for commenters). */
@@ -119,7 +129,7 @@ export default async function taskRoutes(app: FastifyInstance) {
         AND: [
           { assigneeId: req.user.id },
           query.completed !== undefined ? { completed: query.completed } : {},
-          // Assigned tasks stay visible to the assignee even in projects they can no longer open.
+          // Tasks in projects the assignee can no longer see are left out.
           visibleTasksWhere(req.user),
         ],
       },
@@ -153,11 +163,15 @@ export default async function taskRoutes(app: FastifyInstance) {
       if (body.projectId !== undefined && body.projectId !== parent.projectId) {
         throw validation('Subtasks belong to their parent’s project', [{ path: ['projectId'], message: 'Must match parent' }]);
       }
+      if (parent.parentId) {
+        // One level of subtasks keeps project moves (which re-home direct subtasks) consistent.
+        throw validation('Subtasks cannot have subtasks', [{ path: ['parentId'], message: 'Parent is a subtask' }]);
+      }
       placement.projectId = parent.projectId;
     }
     if (placement.sectionId) placement.projectId = await resolveSection(placement.sectionId, placement.projectId);
     await assertCanEditProject(req, placement.projectId);
-    if (body.assigneeId) await activeUser(body.assigneeId);
+    if (body.assigneeId) await assertCanBeInvolved(body.assigneeId, placement.projectId, 'assigneeId');
 
     const position = body.position ?? (await nextPosition(placement, req.user.id));
     const actorId = req.user.id;
@@ -214,7 +228,12 @@ export default async function taskRoutes(app: FastifyInstance) {
         await resolveSection(body.sectionId, next.projectId);
       }
     }
-    if (body.assigneeId) await activeUser(body.assigneeId);
+    // The assignee after this update must be able to see the project the task ends up in.
+    const nextAssignee = body.assigneeId === undefined ? task.assigneeId : body.assigneeId;
+    const assigneeChanged = body.assigneeId !== undefined && body.assigneeId !== task.assigneeId;
+    if (nextAssignee && (assigneeChanged || next.projectId !== task.projectId)) {
+      await assertCanBeInvolved(nextAssignee, next.projectId, 'assigneeId');
+    }
 
     const data: Prisma.TaskUncheckedUpdateInput = {
       projectId: next.projectId,
@@ -234,9 +253,12 @@ export default async function taskRoutes(app: FastifyInstance) {
 
     const actorId = req.user.id;
     await db.$transaction(async (tx) => {
-      await tx.task.update({ where: { id }, data });
+      const updated = await tx.task.update({ where: { id }, data });
       if (next.projectId !== task.projectId) {
         await tx.task.updateMany({ where: { parentId: id }, data: { projectId: next.projectId, sectionId: null } });
+      }
+      if (body.position !== undefined || next.sectionId !== task.sectionId || next.projectId !== task.projectId) {
+        await renormaliseTaskSiblings(tx, updated);
       }
       await recordChanges(tx, task, body, next, actorId);
     });
@@ -300,8 +322,8 @@ export default async function taskRoutes(app: FastifyInstance) {
   app.post('/tasks/:id/followers', async (req) => {
     const { id } = parse(idParams, req.params);
     const { userId } = parse(FollowerBody, req.body);
-    await findTaskWithAccess(db, req.user, id);
-    await activeUser(userId);
+    const { task } = await findTaskWithAccess(db, req.user, id);
+    await assertCanBeInvolved(userId, task.projectId, 'userId');
     await follow(db, id, [userId]);
     return loadTaskDetail(db, id);
   });

@@ -20,7 +20,9 @@
     "db:generate": "prisma generate",
     "postinstall": "prisma generate",
     "create-admin": "node dist/scripts/create-admin.js",
-    "create-admin:dev": "tsx src/scripts/create-admin.ts"
+    "create-admin:dev": "tsx src/scripts/create-admin.ts",
+    "seed": "node dist/scripts/seed.js",
+    "seed:dev": "tsx src/scripts/seed.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^9.4.0",
