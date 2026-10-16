@@ -101,6 +101,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: aviandri/asana-clone-fe
+          # github.token can only read this repo; if asana-clone-fe is private, add a fine-grained
+          # read-only PAT (Contents: read on asana-clone-fe) as the FE_REPO_TOKEN secret.
+          token: ${{ secrets.FE_REPO_TOKEN || github.token }}
           ref: ${{ inputs.fe_ref || 'main' }}
           path: fe
           sparse-checkout: scripts
