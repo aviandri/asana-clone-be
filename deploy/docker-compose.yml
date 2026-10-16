@@ -1,0 +1,53 @@
+# Full stack: postgres + backend + frontend (nginx serving the SPA, proxying /api to be).
+# Expects both repos cloned side by side:
+#   ./asana-clone-be   (this repo; run compose from asana-clone-be/deploy)
+#   ./asana-clone-fe
+# Usage: cp .env.example .env && edit && docker compose up -d --build
+name: asana-clone
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-asana}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-asana}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  be:
+    build:
+      context: ..
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-asana}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-asana}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: 0.0.0.0
+    # Not published: only reachable through the fe nginx proxy.
+    expose:
+      - "3000"
+
+  fe:
+    build:
+      context: ${FE_CONTEXT:-../../asana-clone-fe}
+    restart: unless-stopped
+    depends_on:
+      be:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+
+volumes:
+  pgdata:
