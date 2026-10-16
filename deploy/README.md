@@ -20,6 +20,11 @@ Production: put TLS in front (or terminate it on a load balancer) and set `APP_U
 URL. With `NODE_ENV=production` the `sid` cookie is `Secure`, so plain http only works on
 `localhost`.
 
+`APP_TIMEZONE` (IANA name, default `Asia/Jakarta`) sets the day boundary for reporting: what
+counts as "today" and "overdue", and where Monday-based weeks start. Stored timestamps are UTC
+and unaffected; changing it only shifts how reports bucket them. Postgres and the container
+clock can stay UTC.
+
 ## Creating the first admin
 Users join only by admin invite, so the first admin has to be bootstrapped once:
 ```sh

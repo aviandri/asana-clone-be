@@ -32,6 +32,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-asana}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-asana}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       APP_URL: ${APP_URL:-http://localhost:8080}
+      # IANA zone for reports: "today", overdue, Monday week starts.
+      APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Jakarta}
       NODE_ENV: production
       PORT: "3000"
       HOST: 0.0.0.0
