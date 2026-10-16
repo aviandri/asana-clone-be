@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
+import { projectAccess } from './access.js';
 import { hashPassword } from './password.js';
+import { SESSION_COOKIE } from '../plugins/auth.js';
 import { currentPeriods } from './time.js';
 
 /**
@@ -207,11 +209,7 @@ export async function seed(app: FastifyInstance) {
     cookies[u.key] = `sid=${sid.value}`;
   }
 
-  async function call<T = { id: string }>(who: Who, method: 'POST' | 'PATCH', url: string, payload: object): Promise<T> {
-    const res = await app.inject({ method, url: `/api/v1${url}`, headers: { cookie: cookies[who] }, payload });
-    if (res.statusCode >= 300) throw new Error(`Seed ${method} ${url} failed (${res.statusCode}): ${res.body}`);
-    return res.json() as T;
-  }
+  const call = makeCaller(app, cookies);
 
   const mention = (body: string) => body.replace(/@\[([^\]]+)\]\((\w+)\)/g, (_m, name, key: Who) => `@[${name}](${ids[key]})`);
 
@@ -278,6 +276,67 @@ export async function seed(app: FastifyInstance) {
 }
 
 type Call = <T = { id: string }>(who: Who, method: 'POST' | 'PATCH', url: string, payload: object) => Promise<T>;
+
+function makeCaller(app: FastifyInstance, cookies: Record<Who, string>, onCreated?: (url: string, id: string) => void): Call {
+  return async <T = { id: string }>(who: Who, method: 'POST' | 'PATCH', url: string, payload: object) => {
+    const res = await app.inject({ method, url: `/api/v1${url}`, headers: { cookie: cookies[who] }, payload });
+    if (res.statusCode >= 300) throw new Error(`Seed ${method} ${url} failed (${res.statusCode}): ${res.body}`);
+    const body = res.json();
+    if (method === 'POST' && onCreated && body?.id) onCreated(url, body.id);
+    return body as T;
+  };
+}
+
+/**
+ * `npm run seed -- --goals-only`: adds the §10 goal cascade to an existing database that was
+ * seeded before goals existed (e.g. a live preview). Non-destructive. It runs only while there
+ * are no goals, and only if the seed users, teams and project are still there and still have the
+ * access the cascade needs. Otherwise it skips with a reason. Sessions are minted directly
+ * (users may have changed their passwords). If a step fails, the goals it created are removed.
+ */
+export async function seedGoalsOnly(app: FastifyInstance): Promise<{ goals: number } | { skipped: string }> {
+  const db = app.db;
+  if ((await db.goal.count()) > 0) return { skipped: 'goals already exist' };
+
+  const users = await db.user.findMany({ where: { email: { in: USERS.map((u) => u.email) } } });
+  const ids = {} as Record<Who, string>;
+  for (const u of USERS) {
+    const found = users.find((x) => x.email === u.email);
+    if (!found?.isActive) return { skipped: `seed user ${u.email} is missing or inactive` };
+    ids[u.key] = found.id;
+  }
+  if (users.find((u) => u.id === ids.admin)!.role !== 'ADMIN') return { skipped: 'admin@example.com is no longer an admin' };
+
+  const teams: Record<string, string> = {};
+  for (const [name, member] of [['Engineering', 'bob'], ['Marketing', 'alice']] as const) {
+    const team = await db.team.findFirst({ where: { name }, select: { id: true } });
+    if (!team) return { skipped: `team "${name}" is missing` };
+    const isMember = await db.teamMember.count({ where: { teamId: team.id, userId: ids[member] } });
+    if (!isMember) return { skipped: `${member}@example.com is no longer in team "${name}"` };
+    teams[name] = team.id;
+  }
+
+  const project = await db.project.findFirst({ where: { name: 'Mobile App v2' }, select: { id: true } });
+  if (!project) return { skipped: 'project "Mobile App v2" is missing' };
+  const bob = users.find((u) => u.id === ids.bob)!;
+  const bobSees = await projectAccess(db, bob, project.id).then(() => true, () => false);
+  if (!bobSees) return { skipped: 'bob@example.com can no longer see "Mobile App v2"' };
+
+  const cookies = {} as Record<Who, string>;
+  for (const u of USERS) cookies[u.key] = `${SESSION_COOKIE}=${app.jwt.sign({ sub: ids[u.key] })}`;
+  const createdGoals: string[] = [];
+  const call = makeCaller(app, cookies, (url, id) => {
+    if (url === '/goals') createdGoals.push(id);
+  });
+  try {
+    const goals = await seedGoals(call, ids, teams, { 'Mobile App v2': project.id }, currentPeriods(app.config.APP_TIMEZONE)[2]!);
+    return { goals };
+  } catch (err) {
+    // KRs, links and updates cascade with their goals.
+    await db.goal.deleteMany({ where: { id: { in: createdGoals } } });
+    throw err;
+  }
+}
 
 /**
  * SPEC §10 seed: a 3-level cascade for the current quarter. One company goal (SUB_GOALS) has two

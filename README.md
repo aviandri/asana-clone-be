@@ -25,7 +25,7 @@ On the shared dev box, wrap heavy commands in the lock: `../heavy.sh npm test`.
 | `typecheck` / `lint` | `tsc --noEmit` / the same plus unused-code checks |
 | `test` | Vitest integration tests via `app.inject` against `TEST_DATABASE_URL` (must be a `*_test` DB; it is migrated and truncated) |
 | `db:migrate` / `db:migrate:dev` | `prisma migrate deploy` / `prisma migrate dev` |
-| `seed` | demo data per SPEC §7 (admin/alice/bob @example.com, password `password123`). Refuses if the DB has users; `npm run seed -- --reset` **wipes everything** first. With `NODE_ENV=production`, `--reset` is refused unless `--force-production` is also passed. Runs from `dist/`; `seed:dev` runs from source. |
+| `seed` | demo data per SPEC §7 (admin/alice/bob @example.com, password `password123`). Refuses if the DB has users; `npm run seed -- --reset` **wipes everything** first. With `NODE_ENV=production`, `--reset` is refused unless `--force-production` is also passed. `npm run seed -- --goals-only` is non-destructive: it adds the demo goal cascade to an already seeded DB that has no goals yet, and skips if the seed users, teams or project are gone. Runs from `dist/`; `seed:dev` runs from source. |
 | `create-admin` | `npm run create-admin -- --email you@co.com --name "You" --password '…'`: creates an ADMIN, or promotes and reactivates an existing user (then name/password are optional). Runs from `dist/`, so it works in the production image. `create-admin:dev` runs it from source. |
 
 ## Bootstrapping a deployment
@@ -47,6 +47,8 @@ src/plugins/auth.ts sid cookie (signed JWT, 7d); every route needs a session unl
 src/lib/access.ts   project visibility + edit/manage rules (SPEC §4)
 src/lib/goal-progress.ts  goal progress maths + cycle/depth checks (SPEC §10), pure and unit-tested
 src/lib/time.ts     APP_TIMEZONE-aware dates, weeks and goal periods
+src/lib/csv.ts      RFC 4180 CSV with formula-injection escaping and a UTF-8 BOM
+src/routes/reports.ts  project report, overview, workload, CSV export (SPEC §11)
 src/routes/*        one file per resource
 src/scripts/*       CLI entrypoints, compiled to dist/scripts
 prisma/             schema (full v1 data model) + migrations
