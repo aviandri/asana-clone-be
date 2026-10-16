@@ -10,6 +10,7 @@ Node 20 · TypeScript (strict) · Fastify 4 · Prisma 5 · PostgreSQL 16 · zod 
 cp .env.example .env      # defaults point at the shared dev Postgres on 127.0.0.1:5433
 npm install               # also runs `prisma generate`
 npm run db:migrate        # prisma migrate deploy against DATABASE_URL
+npm run build && npm run seed   # optional demo data
 npm run dev               # http://localhost:3000 (GET /health)
 ```
 
@@ -24,6 +25,7 @@ On the shared dev box, wrap heavy commands in the lock: `../heavy.sh npm test`.
 | `typecheck` / `lint` | `tsc --noEmit` / the same plus unused-code checks |
 | `test` | Vitest integration tests via `app.inject` against `TEST_DATABASE_URL` (must be a `*_test` DB; it is migrated and truncated) |
 | `db:migrate` / `db:migrate:dev` | `prisma migrate deploy` / `prisma migrate dev` |
+| `seed` | demo data per SPEC §7 (admin/alice/bob @example.com, password `password123`). Refuses if the DB has users; `npm run seed -- --reset` **wipes everything** first. Runs from `dist/`; `seed:dev` runs from source. |
 | `create-admin` | `npm run create-admin -- --email you@co.com --name "You" --password '…'`: creates an ADMIN, or promotes and reactivates an existing user (then name/password are optional). Runs from `dist/`, so it works in the production image. `create-admin:dev` runs it from source. |
 
 ## Bootstrapping a deployment
