@@ -17,6 +17,7 @@ import storyRoutes from './routes/stories.js';
 import notificationRoutes from './routes/notifications.js';
 import searchRoutes from './routes/search.js';
 import goalRoutes from './routes/goals.js';
+import reportRoutes from './routes/reports.js';
 
 export type AppOptions = {
   config: Pick<Config, 'JWT_SECRET' | 'APP_URL' | 'NODE_ENV' | 'AUTH_RATE_LIMIT_MAX' | 'APP_TIMEZONE'>;
@@ -69,6 +70,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       await api.register(notificationRoutes);
       await api.register(searchRoutes);
       await api.register(goalRoutes);
+      await api.register(reportRoutes);
     },
     { prefix: '/api/v1' },
   );

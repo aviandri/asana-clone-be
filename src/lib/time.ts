@@ -46,3 +46,37 @@ export function sortPeriods(periods: Iterable<string>): string[] {
     return ka[0] - kb[0] || ka[1] - kb[1] || ka[2] - kb[2];
   });
 }
+
+// --- zone ↔ UTC instants -----------------------------------------------------
+
+/** Offset of `tz` from UTC at instant `at`, in ms (e.g. +7h for Asia/Jakarta). */
+function zoneOffsetMs(tz: string, at: number): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(at));
+  const get = (type: string) => Number(parts.find((p) => p.type === type)!.value);
+  const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+  return asUtc - Math.floor(at / 1000) * 1000;
+}
+
+/** The UTC instant at which calendar day `date` (`YYYY-MM-DD`) starts in `tz`. DST-safe. */
+export function zonedDayStart(date: string, tz: string): Date {
+  const naive = Date.parse(`${date}T00:00:00Z`);
+  let instant = naive - zoneOffsetMs(tz, naive);
+  // A DST change between the guess and the answer shifts the offset; one correction settles it.
+  const corrected = naive - zoneOffsetMs(tz, instant);
+  if (corrected !== instant) instant = corrected;
+  return new Date(instant);
+}
+
+/** Inclusive day count from `from` to `to` (`YYYY-MM-DD`). */
+export function daysBetweenInclusive(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+}

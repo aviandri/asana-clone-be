@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { databaseIsEmpty, resetDatabase, seed, SEED_PASSWORD } from '../src/lib/seed.js';
+import { databaseIsEmpty, resetDatabase, seed, seedGoalsOnly, SEED_PASSWORD } from '../src/lib/seed.js';
 import { login, prisma, setupApp } from './helpers.js';
 import { currentPeriods } from '../src/lib/time.js';
 
@@ -44,4 +44,30 @@ describe('seed (SPEC §7)', () => {
     await resetDatabase(prisma);
     expect(await databaseIsEmpty(prisma)).toBe(true);
   });
+
+  it('--goals-only adds the cascade to a seeded database without goals, and is otherwise a no-op', async () => {
+    await seed(ctx.app);
+    await prisma.goal.deleteMany();
+    // Users may have changed passwords on a live DB; goals-only doesn't log in.
+    await prisma.user.updateMany({ data: { passwordHash: 'changed' } });
+    const tasksBefore = await prisma.task.count();
+
+    expect(await seedGoalsOnly(ctx.app)).toEqual({ goals: 6 });
+    expect(await prisma.goal.count()).toBe(6);
+    expect(await prisma.goalProject.count()).toBe(1);
+    expect(await prisma.task.count()).toBe(tasksBefore);
+
+    expect(await seedGoalsOnly(ctx.app)).toEqual({ skipped: 'goals already exist' });
+    expect(await prisma.goal.count()).toBe(6);
+  });
+
+  it('--goals-only skips cleanly when the seed users, teams or project are gone', async () => {
+    expect(await seedGoalsOnly(ctx.app)).toEqual({ skipped: 'seed user admin@example.com is missing or inactive' });
+    await seed(ctx.app);
+    await prisma.goal.deleteMany();
+    await prisma.project.updateMany({ where: { name: 'Mobile App v2' }, data: { name: 'Renamed' } });
+    expect(await seedGoalsOnly(ctx.app)).toEqual({ skipped: 'project "Mobile App v2" is missing' });
+    expect(await prisma.goal.count()).toBe(0);
+  });
 });
+
