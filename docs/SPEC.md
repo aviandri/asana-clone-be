@@ -22,9 +22,11 @@ orchestrator — do not silently diverge.
 - Inbox: notifications (assigned, commented, completed, mentioned via `@[Name](userId)`).
 - Global search (tasks, projects, users).
 
-### v2 (later, do NOT build yet)
+### v1.1 (in progress): see §10 Goals/OKRs and §11 Reporting
+
+### Later (do NOT build yet)
 Attachments, tags, custom fields, real-time (WebSocket), Google SSO, email notifications,
-multi-project tasks, timeline/Gantt, portfolios/goals.
+multi-project tasks, timeline/Gantt, portfolios, goal notifications.
 
 ## 2. Tech stack & conventions
 
@@ -231,7 +233,149 @@ Admin `admin@example.com` / `password123`; members `alice@example.com`, `bob@exa
 The platform session writes the Dockerfile and CI against these, so keep to them:
 - package.json scripts: `build` (tsc → `dist/`), `start` = `node dist/server.js`, `typecheck`, `lint`, `test` (vitest), `seed`.
 - Prisma schema at `prisma/schema.prisma`; `prisma` goes in `dependencies` (runtime image runs `prisma migrate deploy`).
-- Env: `DATABASE_URL`, `TEST_DATABASE_URL`, `JWT_SECRET`, `APP_URL`, `PORT=3000`, `HOST=0.0.0.0`, `NODE_ENV`.
+- Env: `DATABASE_URL`, `TEST_DATABASE_URL`, `JWT_SECRET`, `APP_URL`, `PORT=3000`, `HOST=0.0.0.0`, `NODE_ENV`, `APP_TIMEZONE` (IANA, default `Asia/Jakarta`, used by reports).
 - `GET /health` → `{ok:true}` on :3000 (outside `/api/v1`). FE nginx proxies `/api/` and `/health` to `be:3000`.
 - Dev DBs: `postgresql://postgres:postgres@localhost:5433/asana` and `.../asana_test` (already running).
 - Run heavy commands via `/home/claude/projects/asana-clone/heavy.sh <cmd>` (shared lock; low RAM).
+
+## 10. Goals / OKRs (v1.1)
+
+Asana-style goals. A **goal** is an Objective with optional **key results** (KRs). Goals
+**cascade**: a goal may align to a parent goal (company → team → individual), and progress can
+roll up from sub-goals, key results or linked projects.
+
+### Data model
+```
+Goal        id, title, description?, ownerId, isCompany(bool), teamId?, parentId? (→ Goal),
+            timePeriod, status, progressSource, manualProgress(float 0–100, default 0),
+            weight(int ≥1, default 1), createdAt, updatedAt
+KeyResult   id, goalId, title, metricType(NUMBER|PERCENT|CURRENCY|BOOLEAN), startValue, targetValue,
+            currentValue (floats), unit?, ownerId?, position(float), createdAt, updatedAt
+GoalProject goalId, projectId (PK both)
+GoalUpdate  id, goalId, authorId, status, progress(float snapshot), body?, createdAt
+```
+- `timePeriod`: `YYYY` | `YYYY-H1|H2` | `YYYY-Q1..Q4` (validated by regex).
+- `status`: `NO_STATUS` (default) | `ON_TRACK` | `AT_RISK` | `OFF_TRACK` | `ACHIEVED` | `PARTIAL` | `MISSED` | `DROPPED`.
+- `progressSource`: `KEY_RESULTS` (default) | `SUB_GOALS` | `PROJECTS` | `MANUAL`.
+- Deleting a goal deletes its KRs, links and updates; its children get `parentId = null`.
+- `parentId` must not create a cycle (→ `400 VALIDATION` on `parentId`); max depth 6. A goal can't
+  be its own parent.
+- `BOOLEAN` KRs: start 0, target 1, current 0 or 1.
+
+### Progress (computed by the server on every read, 0–100, rounded to 1 decimal)
+- **KR progress** = clamp((current − start) / (target − start) × 100, 0, 100); if target == start → 100 when current ≥ target, else 0. Works for decreasing targets (start > target).
+- `KEY_RESULTS`: mean of its KRs' progress (0 if none).
+- `SUB_GOALS`: weight-averaged progress of its direct children (recursive; 0 if none).
+- `PROJECTS`: completed ÷ total over **all** tasks (incl. subtasks) of linked projects (0 if no tasks).
+- `MANUAL`: `manualProgress`.
+
+### Permissions
+- Every active user can **see** every goal (goals are company-wide).
+- Goal **levels**: *company* (`isCompany = true`, `teamId = null`), *team* (`teamId` set), or
+  *personal* (`isCompany = false`, `teamId = null`). `isCompany` and `teamId` are mutually exclusive (→ 400).
+- **Create**: company goals → ADMIN only; team goals → members of that team or ADMIN; personal
+  goals → anyone. `ownerId` defaults to the caller and must be an active user.
+- **Edit / delete / manage KRs, links**: goal owner, ADMIN, or (team goals) any member of its team.
+- **Update a KR's `currentValue`**: additionally the KR's owner.
+- **Post a status update**: anyone who can edit the goal, or owns one of its KRs.
+- Linked projects the viewer can't see are omitted from `projects` and counted in
+  `hiddenProjectCount` (their task counts still feed `PROJECTS` progress).
+Responses include `canEdit: boolean` for the caller.
+
+### Shapes
+```ts
+type GoalStatus = 'NO_STATUS'|'ON_TRACK'|'AT_RISK'|'OFF_TRACK'|'ACHIEVED'|'PARTIAL'|'MISSED'|'DROPPED';
+type Goal = {
+  id: string; title: string; description: string|null;
+  owner: UserSummary; team: { id: string; name: string } | null; isCompany: boolean;
+  parentId: string|null; timePeriod: string; status: GoalStatus;
+  progressSource: 'KEY_RESULTS'|'SUB_GOALS'|'PROJECTS'|'MANUAL';
+  progress: number; weight: number; keyResultCount: number; childCount: number;
+  canEdit: boolean; createdAt: string; updatedAt: string;
+};
+type KeyResult = {
+  id: string; goalId: string; title: string; metricType: 'NUMBER'|'PERCENT'|'CURRENCY'|'BOOLEAN';
+  startValue: number; targetValue: number; currentValue: number; unit: string|null;
+  owner: UserSummary|null; progress: number; position: number; updatedAt: string;
+};
+type GoalUpdate = { id: string; goalId: string; author: UserSummary; status: GoalStatus; progress: number; body: string|null; createdAt: string };
+type GoalDetail = Goal & {
+  parent: { id: string; title: string } | null;
+  keyResults: KeyResult[];               // by position
+  children: Goal[];                      // direct sub-goals
+  projects: { project: { id: string; name: string; color: string }; total: number; completed: number }[];
+  hiddenProjectCount: number;
+  latestUpdate: GoalUpdate | null;
+};
+```
+
+### Endpoints
+| Method | Path | Body / Query | Returns |
+|---|---|---|---|
+| GET | `/goals` | `?timePeriod=&teamId=&ownerId=&company=true&q=` — flat list, FE builds the tree from `parentId` | `{data: Goal[]}` |
+| POST | `/goals` | `{title, timePeriod, description?, ownerId?, teamId?, isCompany?, parentId?, progressSource?, weight?}` | `201 GoalDetail` |
+| GET | `/goals/:id` | | `GoalDetail` |
+| PATCH | `/goals/:id` | any of `title, description, ownerId, teamId, isCompany, parentId, timePeriod, status, progressSource, manualProgress, weight` | `GoalDetail` |
+| DELETE | `/goals/:id` | | `204` |
+| POST | `/goals/:id/key-results` | `{title, metricType, startValue?=0, targetValue, currentValue?=startValue, unit?, ownerId?, position?}` | `201 KeyResult` |
+| PATCH | `/key-results/:id` | any writable KR field | `KeyResult` |
+| DELETE | `/key-results/:id` | | `204` |
+| POST | `/goals/:id/projects` | `{projectId}` (caller must see the project) | `GoalDetail` |
+| DELETE | `/goals/:id/projects/:projectId` | | `GoalDetail` |
+| GET | `/goals/:id/updates` | newest first | `{data: GoalUpdate[]}` |
+| POST | `/goals/:id/updates` | `{status, body?}` — also sets the goal's `status`, snapshots `progress` | `201 GoalUpdate` |
+| GET | `/goals/time-periods` | distinct periods in use + current quarter/half/year | `{data: string[]}` |
+
+Seed: add a 3-level cascade for the current year/quarter (1 company goal with SUB_GOALS → 2 team goals
+→ 2–3 individual goals with KRs; one goal on PROJECTS linked to a seeded project), with a few updates.
+
+## 11. Reporting (v1.1)
+
+Dashboards computed on the fly from tasks. **Time zone**: all date bucketing uses BE env
+`APP_TIMEZONE` (IANA, default `Asia/Jakarta`); weeks start **Monday**; "today" is in that zone.
+"Overdue" = incomplete and `dueDate < today`. Reports count **all tasks incl. subtasks** unless
+stated. Only projects/tasks the caller can see are included (same rules as §4).
+
+### Shapes
+```ts
+type Counts = { total: number; completed: number; incomplete: number; overdue: number };
+type ProjectReport = {
+  project: { id: string; name: string; color: string };
+  totals: Counts & { unassigned: number; percentComplete: number };
+  bySection: { sectionId: string|null; name: string; total: number; completed: number; overdue: number }[]; // section order, "No section" last
+  byAssignee: { assignee: UserSummary|null; incomplete: number; completed: number; overdue: number }[];   // by incomplete desc
+  byPriority: { priority: 'NONE'|'LOW'|'MEDIUM'|'HIGH'; total: number; incomplete: number }[];
+  trend: { weekStart: string; created: number; completed: number; open: number }[]; // oldest→newest, `open` = incomplete at week end
+  upcoming: Task[];   // incomplete, due today..+14d, by dueDate, max 20
+};
+type OverviewReport = {
+  totals: Counts & { projects: number };
+  projects: (Counts & { project: Project; percentComplete: number; lastActivityAt: string|null })[]; // by name
+};
+type WorkloadReport = {
+  from: string; to: string;   // YYYY-MM-DD, inclusive
+  data: { user: UserSummary; open: number; overdue: number; dueInRange: number; completedInRange: number }[]; // by open desc
+};
+```
+
+### Endpoints
+| Method | Path | Query | Returns |
+|---|---|---|---|
+| GET | `/projects/:id/report` | `?weeks=12` (1–52) | `ProjectReport` |
+| GET | `/reports/overview` | `?teamId=` (omit = all visible, non-archived projects) | `OverviewReport` |
+| GET | `/reports/workload` | `?teamId=&from=&to=` (default: this Monday..Sunday; max 92 days). `teamId` limits users to team members and tasks to the team's projects. Personal tasks count for their assignee only when no `teamId`. | `WorkloadReport` |
+| GET | `/projects/:id/tasks.csv` | | `text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="<project-slug>-tasks.csv"`. Columns: `id,title,section,parent_task_id,assignee_name,assignee_email,priority,start_date,due_date,completed,completed_at,created_at` (RFC 4180 quoting; prefix cells starting with `= + - @` with `'` to prevent CSV formula injection) |
+
+### FE (v1.1)
+- Sidebar: **Goals** and **Reporting** entries.
+- **Goals page** `/goals`: time-period picker (default current quarter), filter (All / Company / My
+  team / Mine), collapsible **tree** by `parentId` with progress bars + status pill + owner avatar;
+  "New goal" dialog (pick parent to align = cascade). Goal detail at `/goals/:id` (side panel or
+  page): KRs with inline current-value update, sub-goals, linked projects, progress-source switcher,
+  status update composer + history.
+- **Project Dashboard** tab next to List/Board/Calendar (`/projects/:id/dashboard`): KPI tiles,
+  tasks by section/assignee/priority bar charts, created-vs-completed trend, upcoming list, "Export CSV".
+- **Reporting page** `/reporting`: Overview (project table with % complete, overdue; team filter),
+  Workload (people × open/overdue/due-in-range, date range), Goals summary (count by status, average
+  progress for a period — computed from `GET /goals`).
+- Charts: Recharts (or similar, ≤ ~120 KB gz). Accessible: every chart has a text/table alternative.
