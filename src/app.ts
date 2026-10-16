@@ -12,6 +12,7 @@ import adminRoutes from './routes/admin.js';
 import teamRoutes from './routes/teams.js';
 import projectRoutes from './routes/projects.js';
 import sectionRoutes from './routes/sections.js';
+import taskRoutes from './routes/tasks.js';
 
 export type AppOptions = {
   config: Pick<Config, 'JWT_SECRET' | 'APP_URL' | 'NODE_ENV' | 'AUTH_RATE_LIMIT_MAX'>;
@@ -59,6 +60,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       await api.register(teamRoutes);
       await api.register(projectRoutes);
       await api.register(sectionRoutes);
+      await api.register(taskRoutes);
     },
     { prefix: '/api/v1' },
   );
