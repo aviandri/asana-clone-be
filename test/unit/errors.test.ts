@@ -41,3 +41,20 @@ describe('seed --reset guard', () => {
     expect(resetRefusal(undefined, false)).toBeNull();
   });
 });
+
+describe('position renormalisation helpers', () => {
+  it('detects crowding and renumbers only changed rows', async () => {
+    const { isCrowded, renumber } = await import('../../src/lib/positions.js');
+    const rows = [
+      { id: 'a', position: 1000 },
+      { id: 'b', position: 1000.0000001 },
+      { id: 'c', position: 2000 },
+    ];
+    expect(isCrowded(rows, 'b')).toBe(true);
+    expect(isCrowded(rows, 'c')).toBe(false);
+    expect(renumber(rows)).toEqual([
+      { id: 'b', position: 2000 },
+      { id: 'c', position: 3000 },
+    ]);
+  });
+});

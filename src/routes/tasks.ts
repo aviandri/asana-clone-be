@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { forbidden, notFound, validation } from '../errors.js';
 import { assertCanEdit, projectAccess } from '../lib/access.js';
 import { follow, notify, notifyFollowers, recordActivity } from '../lib/events.js';
+import { renormaliseTaskSiblings } from '../lib/positions.js';
 import { POSITION_STEP } from '../lib/projects.js';
 import { fromDateOnly, toDateOnly } from '../lib/serialize.js';
 import {
@@ -252,9 +253,12 @@ export default async function taskRoutes(app: FastifyInstance) {
 
     const actorId = req.user.id;
     await db.$transaction(async (tx) => {
-      await tx.task.update({ where: { id }, data });
+      const updated = await tx.task.update({ where: { id }, data });
       if (next.projectId !== task.projectId) {
         await tx.task.updateMany({ where: { parentId: id }, data: { projectId: next.projectId, sectionId: null } });
+      }
+      if (body.position !== undefined || next.sectionId !== task.sectionId || next.projectId !== task.projectId) {
+        await renormaliseTaskSiblings(tx, updated);
       }
       await recordChanges(tx, task, body, next, actorId);
     });
