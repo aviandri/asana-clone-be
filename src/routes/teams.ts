@@ -91,9 +91,11 @@ export default async function teamRoutes(app: FastifyInstance) {
   app.delete('/teams/:id', async (req, reply) => {
     requireAdmin(req);
     const { id } = parse(idParams, req.params);
-    const team = await app.db.team.findUnique({ where: { id }, include: { _count: { select: { projects: true } } } });
+    const team = await app.db.team.findUnique({ where: { id }, include: { _count: { select: { projects: true, goals: true } } } });
     if (!team) throw notFound('Team');
-    if (team._count.projects > 0) throw conflict('Move or delete this team’s projects first');
+    if (team._count.projects > 0 || team._count.goals > 0) {
+      throw conflict('Move or delete this team’s projects and goals first');
+    }
     await app.db.team.delete({ where: { id } });
     return reply.status(204).send();
   });

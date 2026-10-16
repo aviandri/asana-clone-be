@@ -1,6 +1,15 @@
 import 'dotenv/config';
 import { z } from 'zod';
 
+function isValidTimeZone(tz: string) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DATABASE_URL: z.string().min(1),
@@ -10,6 +19,11 @@ const EnvSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   /** Per-IP attempts per minute on POST /auth/login and /auth/accept-invite. */
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
+  /** IANA zone for "today", current goal periods and report bucketing (SPEC §11). */
+  APP_TIMEZONE: z
+    .string()
+    .default('Asia/Jakarta')
+    .refine(isValidTimeZone, 'APP_TIMEZONE must be an IANA time zone, e.g. Asia/Jakarta'),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

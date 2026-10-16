@@ -16,9 +16,10 @@ import taskRoutes from './routes/tasks.js';
 import storyRoutes from './routes/stories.js';
 import notificationRoutes from './routes/notifications.js';
 import searchRoutes from './routes/search.js';
+import goalRoutes from './routes/goals.js';
 
 export type AppOptions = {
-  config: Pick<Config, 'JWT_SECRET' | 'APP_URL' | 'NODE_ENV' | 'AUTH_RATE_LIMIT_MAX'>;
+  config: Pick<Config, 'JWT_SECRET' | 'APP_URL' | 'NODE_ENV' | 'AUTH_RATE_LIMIT_MAX' | 'APP_TIMEZONE'>;
   prisma?: PrismaClient;
   logger?: boolean;
 };
@@ -67,6 +68,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       await api.register(storyRoutes);
       await api.register(notificationRoutes);
       await api.register(searchRoutes);
+      await api.register(goalRoutes);
     },
     { prefix: '/api/v1' },
   );
