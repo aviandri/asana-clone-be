@@ -47,6 +47,7 @@ docker-compose (postgres + be + fe/nginx).
 - List responses: `{ "data": [...] }`. Single resources: the object itself.
 - Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "GONE" | "RATE_LIMITED" | "INTERNAL", "message": string, "details"?: any } }`
   with matching HTTP status (404/400/401/403/409/410/429/500). `GONE` = used or expired invite; `RATE_LIMITED` = too many login / accept-invite attempts.
+- `error.details` (when present, e.g. on `VALIDATION`) is a zod-style issue array: `[{ "path": ["assigneeId"], "message": "..." }]`.
 - `POST` endpoints that create a resource return `201` (FE: treat any 2xx as success)..
 - Ordering uses float `position`. Clients compute a position between neighbours
   (`(prev+next)/2`, or `last+1000` when appending). Server may renormalise.
