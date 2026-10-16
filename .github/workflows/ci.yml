@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      fe_ref:
+        description: asana-clone-fe ref to take scripts/contract-smoke.mjs from
+        default: main
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -46,6 +51,71 @@ jobs:
       - run: npm run lint --if-present
       - run: npm test
       - run: npm run build
+
+  contract:
+    # FE↔BE contract smoke: the FE repo's zero-dependency script exercises every endpoint the
+    # frontend calls against this BE (migrated + seeded) and checks shapes against SPEC §5.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: asana
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5433/asana
+      JWT_SECRET: ci-only-secret-at-least-16-chars
+      APP_URL: http://localhost:5173
+      NODE_ENV: development
+      PORT: "3000"
+      HOST: 127.0.0.1
+      # The script logs in 4 times; the default (10/min) is enough, but leave headroom.
+      AUTH_RATE_LIMIT_MAX: "50"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run build
+      - run: npm run seed
+      - name: Start backend
+        run: |
+          nohup npm start > be.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:3000/health && exit 0
+            sleep 1
+          done
+          echo "backend did not become healthy"; cat be.log; exit 1
+      - uses: actions/checkout@v4
+        with:
+          repository: aviandri/asana-clone-fe
+          # github.token can only read this repo; if asana-clone-fe is private, add a fine-grained
+          # read-only PAT (Contents: read on asana-clone-fe) as the FE_REPO_TOKEN secret.
+          token: ${{ secrets.FE_REPO_TOKEN || github.token }}
+          ref: ${{ inputs.fe_ref || 'main' }}
+          path: fe
+          sparse-checkout: scripts
+      - name: Run contract smoke
+        env:
+          BASE_URL: http://127.0.0.1:3000
+        run: |
+          test -f fe/scripts/contract-smoke.mjs || { echo "fe/scripts/contract-smoke.mjs not found on asana-clone-fe@${{ inputs.fe_ref || 'main' }}"; exit 1; }
+          node fe/scripts/contract-smoke.mjs
+      - name: Backend log
+        if: always()
+        run: cat be.log || true
 
   docker:
     runs-on: ubuntu-latest
