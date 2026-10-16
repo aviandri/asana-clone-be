@@ -262,6 +262,16 @@ GoalUpdate  id, goalId, authorId, status, progress(float snapshot), body?, creat
   be its own parent.
 - `BOOLEAN` KRs: start 0, target 1, current 0 or 1.
 
+### Clarifications (agreed)
+- Changing level via PATCH (`isCompany` / `teamId`) also requires *create* permission for the new
+  level (403 otherwise). Exclusivity is checked on the resulting state: send `teamId: null` with `isCompany: true`.
+- Max depth 6 = at most 6 goals in a chain (root = 1); re-parenting checks ancestor depth + moved subtree height.
+- Roll-ups use unrounded values; rounding to 1 decimal happens once, at output.
+- A KR owner who can't edit the goal may PATCH only `currentValue` (other fields → 403). BOOLEAN KRs
+  force start/target to 0/1; `currentValue` must be 0 or 1 (400 otherwise).
+- `/goals/time-periods`: newest year first; within a year `YYYY, H1, Q1, Q2, H2, Q3, Q4`; "current" uses `APP_TIMEZONE`.
+- Bad `ownerId`/`parentId` → 400 VALIDATION on that path; unknown `teamId` → 404; linking a project you can't see → 404.
+
 ### Progress (computed by the server on every read, 0–100, rounded to 1 decimal)
 - **KR progress** = clamp((current − start) / (target − start) × 100, 0, 100); if target == start → 100 when current ≥ target, else 0. Works for decreasing targets (start > target).
 - `KEY_RESULTS`: mean of its KRs' progress (0 if none).
@@ -357,6 +367,16 @@ type WorkloadReport = {
   data: { user: UserSummary; open: number; overdue: number; dueInRange: number; completedInRange: number }[]; // by open desc
 };
 ```
+
+### Clarifications (agreed)
+- Subtasks count under their **parent's section** (in `bySection` and the CSV `section` column).
+- Workload follows §4 visibility strictly: a task (incl. personal tasks and private-project tasks)
+  counts only if the **caller** can see it. Admins therefore see the full picture.
+- `dueInRange` = **incomplete** tasks with `dueDate` in `[from, to]` ("still to do this period").
+- `byPriority` always lists all four, ordered `HIGH, MEDIUM, LOW, NONE`.
+- `lastActivityAt` = latest Activity or Comment on any of the project's tasks (`null` if none).
+- CSV: UTF-8 **with BOM** (Excel), CRLF line endings, rows = top-level tasks in list order each
+  followed by its subtasks; formula-injection prefix `'` for cells starting with `= + - @ TAB CR`.
 
 ### Endpoints
 | Method | Path | Query | Returns |
