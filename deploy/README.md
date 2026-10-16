@@ -21,25 +21,17 @@ URL. With `NODE_ENV=production` the `sid` cookie is `Secure`, so plain http only
 `localhost`.
 
 ## Creating the first admin
-Users join only by admin invite, so the first admin has to be bootstrapped once.
-
-**Option A (demo/staging only):** load the seed data. This creates `admin@example.com` /
-`password123`, so change that password immediately or don't use it on anything reachable.
+Users join only by admin invite, so the first admin has to be bootstrapped once:
 ```sh
-docker compose exec be npm run seed
+docker compose exec be npm run create-admin -- \
+  --email you@company.com --name "Your Name" --password 'a-strong-password'
 ```
+Running it for an existing email promotes that user to ADMIN (`--name`/`--password` optional).
+Then log in and invite everyone else from **Admin → Users**.
 
-**Option B (production):** insert the admin row directly. Hash the password with the backend's own
-hashing library, `bcryptjs` (run inside the `be` container, so it matches what login checks).
-Once the backend ships `npm run create-admin`, use that instead.
-```sh
-HASH=$(docker compose exec -T be node -e "require('bcryptjs').hash(process.argv[1], 12).then(console.log)" 'S3cure-Passw0rd')
-docker compose exec -T postgres psql -U asana -d asana -c \
-  "INSERT INTO \"User\" (id, email, name, \"passwordHash\", role, \"isActive\", \"avatarColor\", \"createdAt\")
-   VALUES (gen_random_uuid(), 'you@company.com', 'Your Name', '$HASH', 'ADMIN', true, '#6366f1', now());"
-```
-Then log in and invite everyone else from **Admin → Users**. (Table/column names assume Prisma's
-default mapping of the `User` model; check `prisma/schema.prisma` if the insert fails.)
+For a demo/staging stack you can load sample data instead (`docker compose exec be npm run seed`,
+once the backend ships a compiled seed script). The seed creates `admin@example.com` /
+`password123`, so never use it on anything reachable.
 
 ## Backups
 Logical dump (consistent while running, preferred):

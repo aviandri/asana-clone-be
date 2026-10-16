@@ -31,7 +31,7 @@ jobs:
       # Same URLs as the dev box (devdb on 5433), so tests need no CI-specific config.
       DATABASE_URL: postgresql://postgres:postgres@localhost:5433/asana_test
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5433/asana_test
-      JWT_SECRET: ci-only-secret
+      JWT_SECRET: ci-only-secret-at-least-16-chars
       APP_URL: http://localhost:5173
     steps:
       - uses: actions/checkout@v4
