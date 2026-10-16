@@ -1,14 +1,26 @@
 // Usage: npm run seed            (only seeds an empty database)
-//        npm run seed -- --reset (DELETES ALL DATA first)
+//        npm run seed -- --reset (DELETES ALL DATA first; with NODE_ENV=production it also needs
+//                                 --force-production)
 import { parseArgs } from 'node:util';
 import { PrismaClient } from '@prisma/client';
 import { buildApp } from '../app.js';
 import { loadConfig } from '../config.js';
-import { SEED_PASSWORD, databaseIsEmpty, resetDatabase, seed } from '../lib/seed.js';
+import { SEED_PASSWORD, databaseIsEmpty, resetDatabase, resetRefusal, seed } from '../lib/seed.js';
 
-const { values } = parseArgs({ options: { reset: { type: 'boolean', default: false } } });
+const { values } = parseArgs({
+  options: {
+    reset: { type: 'boolean', default: false },
+    'force-production': { type: 'boolean', default: false },
+  },
+});
 
 const config = loadConfig();
+// Checked before anything connects to the database.
+const refusal = values.reset ? resetRefusal(config.NODE_ENV, values['force-production']) : null;
+if (refusal) {
+  console.error(refusal);
+  process.exit(1);
+}
 const prisma = new PrismaClient();
 const app = await buildApp({ config: { ...config, AUTH_RATE_LIMIT_MAX: 1000 }, prisma, logger: false });
 

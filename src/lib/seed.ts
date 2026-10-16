@@ -165,6 +165,14 @@ function dayOffset(days: number, today = new Date()): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** `--reset` wipes everything; in production it also needs `--force-production`. */
+export function resetRefusal(nodeEnv: string | undefined, forceProduction: boolean): string | null {
+  if (nodeEnv === 'production' && !forceProduction) {
+    return 'Refusing to --reset a production database. Pass --force-production as well if you really mean it.';
+  }
+  return null;
+}
+
 export async function databaseIsEmpty(db: PrismaClient) {
   return (await db.user.count()) === 0;
 }

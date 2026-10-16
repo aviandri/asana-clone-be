@@ -3,6 +3,7 @@ import { AppError } from '../../src/errors.js';
 import { fromDateOnly, toDateOnly } from '../../src/lib/serialize.js';
 import { dateOnly, parse } from '../../src/lib/validate.js';
 import { loadConfig } from '../../src/config.js';
+import { resetRefusal } from '../../src/lib/seed.js';
 
 describe('AppError', () => {
   it('maps codes to HTTP statuses', () => {
@@ -29,5 +30,14 @@ describe('loadConfig', () => {
     const cfg = loadConfig({ DATABASE_URL: 'postgres://x', JWT_SECRET: 'x'.repeat(16) });
     expect(cfg).toMatchObject({ PORT: 3000, HOST: '0.0.0.0', APP_URL: 'http://localhost:5173' });
     expect(() => loadConfig({ DATABASE_URL: 'postgres://x', JWT_SECRET: 'short' })).toThrow(/JWT_SECRET/);
+  });
+});
+
+describe('seed --reset guard', () => {
+  it('refuses production resets without --force-production', () => {
+    expect(resetRefusal('production', false)).toMatch(/--force-production/);
+    expect(resetRefusal('production', true)).toBeNull();
+    expect(resetRefusal('development', false)).toBeNull();
+    expect(resetRefusal(undefined, false)).toBeNull();
   });
 });
