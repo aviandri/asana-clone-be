@@ -57,6 +57,31 @@ enum NotificationType {
   MENTIONED
 }
 
+enum GoalStatus {
+  NO_STATUS
+  ON_TRACK
+  AT_RISK
+  OFF_TRACK
+  ACHIEVED
+  PARTIAL
+  MISSED
+  DROPPED
+}
+
+enum GoalProgressSource {
+  KEY_RESULTS
+  SUB_GOALS
+  PROJECTS
+  MANUAL
+}
+
+enum KeyResultMetric {
+  NUMBER
+  PERCENT
+  CURRENCY
+  BOOLEAN
+}
+
 model User {
   id           String   @id @default(uuid()) @db.Uuid
   email        String   @unique
@@ -78,6 +103,9 @@ model User {
   activities           Activity[]
   notifications        Notification[]  @relation("NotificationRecipient")
   notificationsCreated Notification[]  @relation("NotificationActor")
+  ownedGoals           Goal[]          @relation("GoalOwner")
+  ownedKeyResults      KeyResult[]     @relation("KeyResultOwner")
+  goalUpdates          GoalUpdate[]
 }
 
 model Invite {
@@ -103,6 +131,7 @@ model Team {
 
   members  TeamMember[]
   projects Project[]
+  goals    Goal[]
 }
 
 model TeamMember {
@@ -132,8 +161,9 @@ model Project {
   team     Team            @relation(fields: [teamId], references: [id], onDelete: Restrict)
   owner    User            @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Restrict)
   members  ProjectMember[]
-  sections Section[]
-  tasks    Task[]
+  sections  Section[]
+  tasks     Task[]
+  goalLinks GoalProject[]
 
   @@index([teamId])
 }
@@ -250,4 +280,86 @@ model Notification {
   task  Task? @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@index([userId, read, createdAt])
+}
+
+// --- Goals / OKRs (SPEC §10) -------------------------------------------------
+
+model Goal {
+  id             String             @id @default(uuid()) @db.Uuid
+  title          String
+  description    String?
+  ownerId        String             @db.Uuid
+  /// Company-level goal. Mutually exclusive with teamId; neither = personal goal.
+  isCompany      Boolean            @default(false)
+  teamId         String?            @db.Uuid
+  parentId       String?            @db.Uuid
+  /// YYYY | YYYY-H1|H2 | YYYY-Q1..Q4
+  timePeriod     String
+  status         GoalStatus         @default(NO_STATUS)
+  progressSource GoalProgressSource @default(KEY_RESULTS)
+  manualProgress Float              @default(0)
+  weight         Int                @default(1)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  owner      User          @relation("GoalOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  // Teams with goals can't be deleted (API returns 409), like teams with projects.
+  team       Team?         @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  // Deleting a goal detaches its children (parentId = null).
+  parent     Goal?         @relation("GoalCascade", fields: [parentId], references: [id], onDelete: SetNull)
+  children   Goal[]        @relation("GoalCascade")
+  keyResults KeyResult[]
+  projects   GoalProject[]
+  updates    GoalUpdate[]
+
+  @@index([parentId])
+  @@index([teamId])
+  @@index([timePeriod])
+}
+
+model KeyResult {
+  id           String          @id @default(uuid()) @db.Uuid
+  goalId       String          @db.Uuid
+  title        String
+  metricType   KeyResultMetric
+  startValue   Float           @default(0)
+  targetValue  Float
+  currentValue Float           @default(0)
+  unit         String?
+  ownerId      String?         @db.Uuid
+  position     Float           @default(0)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  goal  Goal  @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  owner User? @relation("KeyResultOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+
+  @@index([goalId, position])
+}
+
+model GoalProject {
+  goalId    String @db.Uuid
+  projectId String @db.Uuid
+
+  goal    Goal    @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@id([goalId, projectId])
+  @@index([projectId])
+}
+
+model GoalUpdate {
+  id        String     @id @default(uuid()) @db.Uuid
+  goalId    String     @db.Uuid
+  authorId  String     @db.Uuid
+  status    GoalStatus
+  /// Progress snapshot (0–100) when the update was posted.
+  progress  Float
+  body      String?
+  createdAt DateTime   @default(now())
+
+  goal   Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([goalId, createdAt])
 }

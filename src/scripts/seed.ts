@@ -34,7 +34,9 @@ try {
   }
   if (process.exitCode !== 1) {
     const counts = await seed(app);
-    console.log(`Seeded ${counts.users} users, ${counts.teams} teams, ${counts.projects} projects, ${counts.tasks} tasks.`);
+    console.log(
+      `Seeded ${counts.users} users, ${counts.teams} teams, ${counts.projects} projects, ${counts.tasks} tasks, ${counts.goals} goals.`,
+    );
     console.log(`Log in as admin@example.com / alice@example.com / bob@example.com with password "${SEED_PASSWORD}".`);
   }
 } catch (err) {

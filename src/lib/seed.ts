@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { PrismaClient } from '@prisma/client';
 import { hashPassword } from './password.js';
+import { currentPeriods } from './time.js';
 
 /**
  * Demo data for SPEC §7. It goes through the real API (app.inject), so followers, activity and
@@ -225,6 +226,7 @@ export async function seed(app: FastifyInstance) {
   }
 
   let taskCount = 0;
+  const projectIds: Record<string, string> = {};
   for (const p of PROJECTS) {
     const project = await call<{ id: string; sections: { id: string }[] }>(p.owner, 'POST', '/projects', {
       teamId: teams[p.team],
@@ -234,6 +236,7 @@ export async function seed(app: FastifyInstance) {
       privacy: p.privacy,
       defaultView: p.defaultView,
     });
+    projectIds[p.name] = project.id;
     for (const m of p.members ?? []) {
       await call(p.owner, 'POST', `/projects/${project.id}/members`, { userId: ids[m.who], role: m.role });
     }
@@ -269,5 +272,92 @@ export async function seed(app: FastifyInstance) {
   await call('alice', 'POST', '/tasks', { title: 'Book dentist appointment', assigneeId: ids.alice, dueDate: dayOffset(4) });
   taskCount += 1;
 
-  return { users: USERS.length, teams: Object.keys(teams).length, projects: PROJECTS.length, tasks: taskCount };
+  const goals = await seedGoals(call, ids, teams, projectIds, currentPeriods(app.config.APP_TIMEZONE)[2]!);
+
+  return { users: USERS.length, teams: Object.keys(teams).length, projects: PROJECTS.length, tasks: taskCount, goals };
+}
+
+type Call = <T = { id: string }>(who: Who, method: 'POST' | 'PATCH', url: string, payload: object) => Promise<T>;
+
+/**
+ * SPEC §10 seed: a 3-level cascade for the current quarter. One company goal (SUB_GOALS) has two
+ * team goals under it (one on PROJECTS, linked to Mobile App v2) and 3 individual goals with KRs,
+ * plus a few status updates. Everything is in one quarter so the default Goals view shows the
+ * whole tree.
+ */
+async function seedGoals(
+  call: Call,
+  ids: Record<Who, string>,
+  teams: Record<string, string>,
+  projectIds: Record<string, string>,
+  quarter: string,
+) {
+  const goal = (who: Who, body: object) => call(who, 'POST', '/goals', { timePeriod: quarter, ...body });
+  const kr = (who: Who, goalId: string, body: object) => call(who, 'POST', `/goals/${goalId}/key-results`, body);
+  const update = (who: Who, goalId: string, status: string, body: string) =>
+    call(who, 'POST', `/goals/${goalId}/updates`, { status, body });
+
+  const company = await goal('admin', {
+    title: 'Grow ARR to $5M',
+    description: 'Company objective for the quarter: ship the mobile app and land the holiday campaign.',
+    isCompany: true,
+    progressSource: 'SUB_GOALS',
+  });
+
+  const eng = await goal('bob', {
+    title: 'Ship Mobile App v2',
+    teamId: teams.Engineering,
+    parentId: company.id,
+    progressSource: 'PROJECTS',
+    weight: 2,
+  });
+  await call('bob', 'POST', `/goals/${eng.id}/projects`, { projectId: projectIds['Mobile App v2'] });
+
+  const marketing = await goal('alice', {
+    title: 'Holiday campaign drives 2,000 sign-ups',
+    teamId: teams.Marketing,
+    parentId: company.id,
+    progressSource: 'SUB_GOALS',
+  });
+
+  const crashes = await goal('bob', { title: 'Cut crash rate below 0.5%', parentId: eng.id });
+  await kr('bob', crashes.id, {
+    title: 'Crash rate',
+    metricType: 'PERCENT',
+    startValue: 2.5,
+    targetValue: 0.5,
+    currentValue: 1.2,
+    unit: '%',
+    ownerId: ids.bob,
+  });
+
+  const newsletter = await goal('alice', { title: 'Grow the newsletter list', parentId: marketing.id });
+  await kr('alice', newsletter.id, {
+    title: 'Subscribers',
+    metricType: 'NUMBER',
+    startValue: 10_000,
+    targetValue: 15_000,
+    currentValue: 12_000,
+    unit: 'subscribers',
+    ownerId: ids.alice,
+  });
+  await kr('alice', newsletter.id, { title: 'Launch referral program', metricType: 'BOOLEAN', targetValue: 1, ownerId: ids.alice });
+
+  const pilots = await goal('admin', { title: 'Close enterprise pilots', parentId: marketing.id, weight: 2 });
+  await kr('admin', pilots.id, {
+    title: 'Pipeline closed',
+    metricType: 'CURRENCY',
+    startValue: 0,
+    targetValue: 500_000,
+    currentValue: 200_000,
+    unit: 'USD',
+    ownerId: ids.admin,
+  });
+  await kr('admin', pilots.id, { title: 'Pilots signed', metricType: 'NUMBER', startValue: 0, targetValue: 5, currentValue: 2 });
+
+  await update('admin', company.id, 'ON_TRACK', 'Mid-quarter check-in: both team goals moving.');
+  await update('bob', eng.id, 'AT_RISK', 'Push notification service is slipping about a week.');
+  await update('alice', newsletter.id, 'ON_TRACK', 'Referral program design is done; launch next sprint.');
+
+  return 6;
 }

@@ -45,6 +45,8 @@ src/config.ts       env parsing (zod)
 src/errors.ts       AppError + { error: { code, message, details? } } handler
 src/plugins/auth.ts sid cookie (signed JWT, 7d); every route needs a session unless config.public
 src/lib/access.ts   project visibility + edit/manage rules (SPEC §4)
+src/lib/goal-progress.ts  goal progress maths + cycle/depth checks (SPEC §10), pure and unit-tested
+src/lib/time.ts     APP_TIMEZONE-aware dates, weeks and goal periods
 src/routes/*        one file per resource
 src/scripts/*       CLI entrypoints, compiled to dist/scripts
 prisma/             schema (full v1 data model) + migrations
