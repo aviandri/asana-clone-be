@@ -4,8 +4,8 @@
 #   upgrade-check.sh snapshot   # after migrating + seeding at the pre-v1.2 commit
 #   upgrade-check.sh verify     # after `prisma migrate deploy` on this commit
 #
-# `snapshot` adds the edge cases the seed lacks (an inactive user, a pending invite, a subtask of a
-# personal task) and records
+# `snapshot` adds the edge cases the seed lacks (an inactive user, two pending invites to the same
+# email, a subtask of a personal task) and records
 # row counts and each user's old role in a side schema (`upgrade_check`) that Prisma ignores.
 # `verify` checks nothing was lost and, once the Workspace table exists, that the backfill
 # matches §12: one default workspace, a membership per user with their old role and active flag,
@@ -31,6 +31,11 @@ VALUES (gen_random_uuid(), 'inactive@example.com', 'Ina Active', 'x', 'MEMBER', 
 INSERT INTO "Invite" (id, email, role, token, "invitedById", "expiresAt")
 SELECT gen_random_uuid(), 'pending@example.com', 'MEMBER', 'upgrade-check-token', id, now() + interval '7 days'
 FROM "User" WHERE role = 'ADMIN' ORDER BY "createdAt" LIMIT 1;
+-- v1 allowed a second pending invite to the same email; the v1.2 partial unique index on pending
+-- ("workspaceId", email) needs the migration to dedupe these first.
+INSERT INTO "Invite" (id, email, role, token, "invitedById", "expiresAt", "createdAt")
+SELECT gen_random_uuid(), 'pending@example.com', 'MEMBER', 'upgrade-check-token-2', id, now() + interval '7 days', now() + interval '1 minute'
+FROM "User" WHERE role = 'ADMIN' ORDER BY "createdAt" LIMIT 1;
 -- A subtask of a personal (project-less) task must land in its parent's workspace.
 INSERT INTO "Task" (id, title, "creatorId", "parentId", "updatedAt")
 SELECT gen_random_uuid(), 'Upgrade-check personal subtask', t."creatorId", t.id, now()
@@ -40,6 +45,9 @@ DROP SCHEMA IF EXISTS upgrade_check CASCADE;
 CREATE SCHEMA upgrade_check;
 CREATE TABLE upgrade_check.users AS SELECT id, role::text AS role, "isActive" AS active FROM "User";
 CREATE TABLE upgrade_check.counts (tbl text PRIMARY KEY, n bigint);
+-- Pending invites beyond the first per email: what a dedupe is expected to remove.
+CREATE TABLE upgrade_check.pending_dupes AS
+SELECT count(*) - count(DISTINCT email) AS extra FROM "Invite" WHERE "acceptedAt" IS NULL;
 DO $$
 DECLARE t text; c bigint;
 BEGIN
@@ -53,8 +61,13 @@ SQL
   ;;
 
 verify)
-  # Nothing lost: every pre-upgrade table still exists with the same number of rows.
+  check "every migration finished (none failed or half-applied)" \
+    "SELECT NOT EXISTS (SELECT 1 FROM _prisma_migrations WHERE finished_at IS NULL OR rolled_back_at IS NOT NULL)"
+  # Nothing lost: every pre-upgrade table still exists with the same number of rows, except that
+  # once the pending-invite unique index exists, duplicate pending invites must have been deduped.
+  dedupe=$(q "SELECT to_regclass('public.\"Invite_workspaceId_email_pending_key\"') IS NOT NULL")
   while IFS='|' read -r tbl n; do
+    if [ "$tbl" = Invite ] && [ "$dedupe" = t ]; then n=$((n - $(q "SELECT extra FROM upgrade_check.pending_dupes"))); fi
     check "$tbl keeps its $n rows" \
       "SELECT to_regclass('public.\"$tbl\"') IS NOT NULL AND (SELECT count(*) FROM public.\"$tbl\") = $n"
   done < <(q "SELECT tbl, n FROM upgrade_check.counts ORDER BY tbl")
@@ -85,6 +98,14 @@ verify)
   done
   check "a task in a project has the project's workspace" \
     "SELECT NOT EXISTS (SELECT 1 FROM \"Task\" t JOIN \"Project\" p ON p.id = t.\"projectId\" WHERE t.\"workspaceId\" <> p.\"workspaceId\")"
+  if [ "$dedupe" = t ]; then
+    check "at most one pending invite per workspace and email (duplicates deduped)" \
+      "SELECT NOT EXISTS (SELECT 1 FROM \"Invite\" WHERE \"acceptedAt\" IS NULL GROUP BY \"workspaceId\", email HAVING count(*) > 1)"
+    check "exactly one pending invite left for pending@example.com" \
+      "SELECT count(*) = 1 FROM \"Invite\" WHERE \"acceptedAt\" IS NULL AND email = 'pending@example.com'"
+  else
+    echo "note - no pending-invite unique index yet; skipping the invite dedupe checks"
+  fi
   check "a subtask has its parent's workspace" \
     "SELECT NOT EXISTS (SELECT 1 FROM \"Task\" t JOIN \"Task\" p ON p.id = t.\"parentId\" WHERE t.\"workspaceId\" <> p.\"workspaceId\")"
   exit "$fail"
