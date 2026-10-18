@@ -188,11 +188,22 @@ export default async function taskRoutes(app: FastifyInstance) {
         // One level of subtasks keeps project moves (which re-home direct subtasks) consistent.
         throw validation('Subtasks cannot have subtasks', [{ path: ['parentId'], message: 'Parent is a subtask' }]);
       }
+      if (placement.sectionId && !parent.projectId) {
+        // A section would pull the subtask into a project (maybe in another workspace).
+        throw validation('Subtasks of personal tasks have no section', [{ path: ['sectionId'], message: 'Parent is a personal task' }]);
+      }
       placement.projectId = parent.projectId;
       workspaceId = parent.workspaceId;
     }
     if (placement.sectionId) placement.projectId = await resolveSection(placement.sectionId, placement.projectId);
-    if (placement.projectId) workspaceId = await assertCanEditProject(req, placement.projectId);
+    if (placement.projectId) {
+      const projectWorkspaceId = await assertCanEditProject(req, placement.projectId);
+      // Defensive: a subtask never lands outside its parent's workspace.
+      if (workspaceId && projectWorkspaceId !== workspaceId) {
+        throw validation('Subtasks belong to their parent’s workspace', [{ path: ['parentId'], message: 'Different workspace' }]);
+      }
+      workspaceId = projectWorkspaceId;
+    }
     workspaceId ??= (await currentMember(req)).workspaceId;
     if (body.assigneeId) await assertCanBeInvolved(body.assigneeId, workspaceId, placement.projectId, 'assigneeId');
 

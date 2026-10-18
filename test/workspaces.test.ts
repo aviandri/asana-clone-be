@@ -213,6 +213,18 @@ describe('isolation: a member of A only never sees workspace B', () => {
     expect(sub.workspaceId).toBe(wsB);
     expect((await ok<{ workspaceId: string }>(await req(carol, 'POST', '/tasks', { title: 'In A' }))).workspaceId).toBe(wsA);
   });
+
+  it('a subtask of a personal task can’t be pulled into a project by a section (even in another workspace)', async () => {
+    const team = await ok(await req(alice, 'POST', '/teams', { name: 'Alpha' }));
+    const project = await ok<{ sections: { id: string }[] }>(
+      await req(alice, 'POST', '/projects', { teamId: team.id, name: 'Alpha plan', privacy: 'PUBLIC' }),
+    );
+    const personalB = await ok<{ id: string }>(await req(carol, 'POST', '/tasks', { title: 'In B' }, wsB));
+    const res = await req(carol, 'POST', '/tasks', { title: 'Sub', parentId: personalB.id, sectionId: project.sections[0]!.id });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.details).toEqual([expect.objectContaining({ path: ['sectionId'] })]);
+    expect(await prisma.task.count({ where: { parentId: personalB.id } })).toBe(0);
+  });
 });
 
 describe('no cross-workspace references', () => {
@@ -381,6 +393,17 @@ describe('/admin/* in the current workspace', () => {
     await ok(await req(alice, 'PATCH', `/admin/users/${carol.user.id}`, { isActive: true }));
     expect((await req(carol, 'GET', '/projects', undefined, wsA)).statusCode).toBe(200);
     expect(await prisma.teamMember.count({ where: { userId: carol.user.id } })).toBe(0);
+  });
+
+  it('an admin deactivating themselves hands sole-owned projects to the senior other admin, not back to themselves', async () => {
+    await ok(await req(alice, 'PATCH', `/admin/users/${carol.user.id}`, { role: 'ADMIN' }));
+    const team = await ok(await req(alice, 'POST', '/teams', { name: 'Alpha' }));
+    const project = await ok<{ id: string }>(await req(alice, 'POST', '/projects', { teamId: team.id, name: 'Alice’s', privacy: 'PRIVATE' }));
+
+    expect(await ok(await req(alice, 'PATCH', `/admin/users/${alice.user.id}`, { isActive: false }))).toMatchObject({ isActive: false });
+    const after = await prisma.project.findUniqueOrThrow({ where: { id: project.id }, include: { members: true } });
+    expect(after.ownerId).toBe(carol.user.id);
+    expect(after.members).toEqual([expect.objectContaining({ userId: carol.user.id, role: 'OWNER' })]);
   });
 
   it('re-activating a globally deactivated user edits the membership but does not let them log in', async () => {

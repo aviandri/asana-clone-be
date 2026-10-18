@@ -4,7 +4,7 @@ import { conflict, notFound } from '../errors.js';
 import { INVITE_TTL_MS, newInviteToken, toInvite } from '../lib/invites.js';
 import { toUser, userSummarySelect } from '../lib/serialize.js';
 import { email, idParams, parse } from '../lib/validate.js';
-import { assertNotLastAdmin, currentMember, removeFromWorkspaceContent } from '../lib/workspaces.js';
+import { assertNotLastAdmin, currentMember, removeFromWorkspaceContent, seniorAdminId } from '../lib/workspaces.js';
 import { requireAdmin } from '../plugins/auth.js';
 
 const role = z.enum(['ADMIN', 'MEMBER']);
@@ -43,8 +43,12 @@ export default async function adminRoutes(app: FastifyInstance) {
       const deactivated = body.isActive === false && existing.isActive;
       if (demoted || deactivated) await assertNotLastAdmin(tx, workspaceId, id);
       // Deactivation removes them from the workspace's teams and projects; the acting admin
-      // inherits projects that would be left without an owner.
-      if (deactivated) await removeFromWorkspaceContent(tx, workspaceId, id, admin.user.id);
+      // inherits projects that would be left without an owner. Admins deactivating themselves
+      // hand them on like leave does: to the longest-standing other admin.
+      if (deactivated) {
+        const heirId = id === admin.user.id ? await seniorAdminId(tx, workspaceId, id) : admin.user.id;
+        await removeFromWorkspaceContent(tx, workspaceId, id, heirId);
+      }
       return tx.workspaceMember.update({ where: key, data: body, include: { user: true } });
     });
     return toUser(membership.user, { role: membership.role, isActive: membership.isActive });
