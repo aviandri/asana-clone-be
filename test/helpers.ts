@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach } from 'vitest';
-import { PrismaClient, type Role } from '@prisma/client';
+import { PrismaClient, type WorkspaceRole } from '@prisma/client';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
@@ -33,21 +33,51 @@ export function setupApp() {
   return ctx;
 }
 
+/** The workspace test users join by default (created on demand; the DB is wiped between tests). */
+export async function defaultWorkspaceId() {
+  const existing = await prisma.workspace.findFirst({ where: { name: 'Test workspace' }, orderBy: { createdAt: 'asc' } });
+  return (existing ?? (await prisma.workspace.create({ data: { name: 'Test workspace', color: '#4186e0' } }))).id;
+}
+
 let seq = 0;
+/**
+ * Creates a user with a membership (`role`, `memberActive`) in `workspaceId` (default: the test
+ * workspace; `null` for none), which also becomes their last-used workspace.
+ */
 export async function createUser(
-  overrides: { email?: string; name?: string; role?: Role; isActive?: boolean } = {},
+  overrides: {
+    email?: string;
+    name?: string;
+    role?: WorkspaceRole;
+    isActive?: boolean;
+    memberActive?: boolean;
+    workspaceId?: string | null;
+  } = {},
 ) {
   seq += 1;
+  const workspaceId = overrides.workspaceId === undefined ? await defaultWorkspaceId() : overrides.workspaceId;
   return prisma.user.create({
     data: {
       email: overrides.email ?? `user${seq}@example.com`,
       name: overrides.name ?? `User ${seq}`,
-      role: overrides.role ?? 'MEMBER',
       isActive: overrides.isActive ?? true,
       avatarColor: '#4186e0',
       passwordHash: await hashPassword(PASSWORD),
+      lastWorkspaceId: workspaceId,
+      ...(workspaceId
+        ? {
+            workspaceMemberships: {
+              create: { workspaceId, role: overrides.role ?? 'MEMBER', isActive: overrides.memberActive ?? true },
+            },
+          }
+        : {}),
     },
   });
+}
+
+/** Adds an existing user to a workspace. */
+export function addMember(workspaceId: string, userId: string, role: WorkspaceRole = 'MEMBER', isActive = true) {
+  return prisma.workspaceMember.create({ data: { workspaceId, userId, role, isActive } });
 }
 
 export function sessionCookie(res: LightMyRequestResponse): string {

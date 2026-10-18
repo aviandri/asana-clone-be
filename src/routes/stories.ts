@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Comment, Prisma, Task } from '@prisma/client';
 import { z } from 'zod';
-import { forbidden, notFound } from '../errors.js';
+import { forbidden, notFound, validation } from '../errors.js';
 import { follow, notify } from '../lib/events.js';
 import { extractMentionIds } from '../lib/mentions.js';
 import { toUserSummary, userSummarySelect, type UserSummaryRow } from '../lib/serialize.js';
@@ -26,11 +26,20 @@ export default async function storyRoutes(app: FastifyInstance) {
 
   /**
    * Users mentioned in `body` who are active and can see the task. Mentioning someone who can't
-   * see the task notifies nobody, so the task's title doesn't leak.
+   * see the task notifies nobody, so the task's title doesn't leak. Mentioning someone outside the
+   * task's workspace is rejected (SPEC §12).
    */
   async function mentionRecipients(task: Task, body: string, exclude: string[] = []) {
     const ids = extractMentionIds(body).filter((id) => !exclude.includes(id));
     if (ids.length === 0) return [];
+    const outsiders = await db.user.count({
+      where: { id: { in: ids }, workspaceMemberships: { none: { workspaceId: task.workspaceId, isActive: true } } },
+    });
+    if (outsiders > 0) {
+      throw validation('Only members of this workspace can be mentioned', [
+        { path: ['body'], message: 'Mentions someone outside this workspace' },
+      ]);
+    }
     const users = await db.user.findMany({ where: { id: { in: ids }, isActive: true } });
     const allowed = await Promise.all(
       users.map((u) => taskAccess(db, u, task).then(() => u.id, () => null)),
@@ -87,8 +96,8 @@ export default async function storyRoutes(app: FastifyInstance) {
       await follow(tx, id, [actorId]);
       // Mentioned users get MENTIONED instead of COMMENTED, so each person gets one notification.
       const followers = await tx.taskFollower.findMany({ where: { taskId: id }, select: { userId: true } });
-      await notify(tx, 'COMMENTED', actorId, id, followers.map((f) => f.userId).filter((u) => !mentioned.includes(u)));
-      await notify(tx, 'MENTIONED', actorId, id, mentioned);
+      await notify(tx, 'COMMENTED', actorId, task, followers.map((f) => f.userId).filter((u) => !mentioned.includes(u)));
+      await notify(tx, 'MENTIONED', actorId, task, mentioned);
       return created;
     });
     return reply.status(201).send(toCommentStory(comment));
@@ -111,7 +120,7 @@ export default async function storyRoutes(app: FastifyInstance) {
         data: { body, editedAt: new Date() },
         include: { author: { select: userSummarySelect } },
       });
-      await notify(tx, 'MENTIONED', req.user.id, existing.taskId, newlyMentioned);
+      await notify(tx, 'MENTIONED', req.user.id, existing.task, newlyMentioned);
       return updated;
     });
     return toCommentStory(comment);
@@ -120,10 +129,10 @@ export default async function storyRoutes(app: FastifyInstance) {
   app.delete('/comments/:id', async (req, reply) => {
     const { id } = parse(idParams, req.params);
     const existing = await findComment(id);
-    await taskAccess(db, req.user, existing.task).catch(() => {
+    const { member } = await taskAccess(db, req.user, existing.task).catch(() => {
       throw notFound('Comment');
     });
-    if (existing.authorId !== req.user.id && req.user.role !== 'ADMIN') {
+    if (existing.authorId !== req.user.id && member.role !== 'ADMIN') {
       throw forbidden('Only the author or an admin can delete a comment');
     }
     await db.comment.delete({ where: { id } });

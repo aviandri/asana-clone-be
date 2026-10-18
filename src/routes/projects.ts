@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { conflict, forbidden, notFound } from '../errors.js';
+import { conflict, forbidden, notFound, validation } from '../errors.js';
 import { assertCanEdit, assertCanManage, projectAccess, visibleProjectsWhere } from '../lib/access.js';
 import {
   DEFAULT_SECTIONS,
@@ -11,6 +11,7 @@ import {
   toSection,
 } from '../lib/projects.js';
 import { hexColor, idParams, parse, queryBool, uuid } from '../lib/validate.js';
+import { currentMember, findMember } from '../lib/workspaces.js';
 
 const privacy = z.enum(['PUBLIC', 'TEAM', 'PRIVATE']);
 const defaultView = z.enum(['LIST', 'BOARD', 'CALENDAR']);
@@ -48,10 +49,11 @@ const CreateSectionBody = z.object({ name: z.string().trim().min(1).max(200), po
 export default async function projectRoutes(app: FastifyInstance) {
   app.get('/projects', async (req) => {
     const query = parse(ListQuery, req.query);
+    const member = await currentMember(req);
     const projects = await app.db.project.findMany({
       where: {
         AND: [
-          visibleProjectsWhere(req.user),
+          visibleProjectsWhere(member),
           { archived: query.archived },
           query.teamId ? { teamId: query.teamId } : {},
           query.q ? { name: { contains: query.q, mode: 'insensitive' } } : {},
@@ -65,16 +67,19 @@ export default async function projectRoutes(app: FastifyInstance) {
 
   app.post('/projects', async (req, reply) => {
     const body = parse(CreateBody, req.body);
-    const team = await app.db.team.findUnique({
-      where: { id: body.teamId },
+    const member = await currentMember(req);
+    // The team must be in the current workspace; the project inherits it.
+    const team = await app.db.team.findFirst({
+      where: { id: body.teamId, workspaceId: member.workspaceId },
       select: { members: { where: { userId: req.user.id }, select: { userId: true } } },
     });
     if (!team) throw notFound('Team');
-    if (req.user.role !== 'ADMIN' && team.members.length === 0) {
+    if (member.role !== 'ADMIN' && team.members.length === 0) {
       throw forbidden('Join this team to create projects in it');
     }
     const project = await app.db.project.create({
       data: {
+        workspaceId: member.workspaceId,
         teamId: body.teamId,
         ownerId: req.user.id,
         name: body.name,
@@ -117,9 +122,15 @@ export default async function projectRoutes(app: FastifyInstance) {
   app.post('/projects/:id/members', async (req) => {
     const { id } = parse(idParams, req.params);
     const body = parse(AddMemberBody, req.body);
-    assertCanManage(await projectAccess(app.db, req.user, id));
+    const access = await projectAccess(app.db, req.user, id);
+    assertCanManage(access);
     const user = await app.db.user.findUnique({ where: { id: body.userId } });
     if (!user || !user.isActive) throw notFound('User');
+    if (!(await findMember(app.db, user, access.member.workspaceId))) {
+      throw validation('User is not an active member of this workspace', [
+        { path: ['userId'], message: 'Not an active workspace member' },
+      ]);
+    }
     const existing = await app.db.projectMember.findUnique({
       where: { projectId_userId: { projectId: id, userId: body.userId } },
     });

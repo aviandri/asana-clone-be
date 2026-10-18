@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { User } from '@prisma/client';
 import { extractMentionIds } from '../src/lib/mentions.js';
-import { createUser, prisma, setupApp, signedIn } from './helpers.js';
+import { createUser, prisma, setupApp, signedIn, defaultWorkspaceId } from './helpers.js';
 
 const ctx = setupApp();
 
@@ -18,7 +18,7 @@ beforeEach(async () => {
   carol = await signedIn(ctx.app, { name: 'Carol' });
   outsider = await signedIn(ctx.app, { name: 'Outsider' });
   const team = await prisma.team.create({
-    data: {
+    data: { workspaceId: await defaultWorkspaceId(),
       name: 'Eng',
       members: { create: [{ userId: alice.user.id }, { userId: bob.user.id }, { userId: carol.user.id }] },
     },
@@ -163,6 +163,7 @@ describe('notifications', () => {
     ]);
     expect(list.data[0]).toEqual({
       id: expect.any(String),
+      workspaceId: expect.any(String),
       type: 'COMMENTED',
       read: false,
       createdAt: expect.any(String),

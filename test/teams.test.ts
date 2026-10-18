@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createUser, prisma, setupApp, signedIn } from './helpers.js';
+import { createUser, prisma, setupApp, signedIn, defaultWorkspaceId } from './helpers.js';
 
 const ctx = setupApp();
 
@@ -20,6 +20,7 @@ describe('teams', () => {
     const team = await createTeam(cookie);
     expect(team).toEqual({
       id: expect.any(String),
+      workspaceId: expect.any(String),
       name: 'Engineering',
       description: 'Builds things',
       memberCount: 1,
@@ -99,7 +100,7 @@ describe('teams', () => {
     expect(forbidden.statusCode).toBe(403);
 
     await prisma.project.create({
-      data: { teamId: team.id, ownerId: member.user.id, name: 'P', color: '#4186e0' },
+      data: { workspaceId: await defaultWorkspaceId(), teamId: team.id, ownerId: member.user.id, name: 'P', color: '#4186e0' },
     });
     const blocked = await ctx.app.inject({ method: 'DELETE', url: `/api/v1/teams/${team.id}`, headers: { cookie: admin.cookie } });
     expect(blocked.statusCode).toBe(409);

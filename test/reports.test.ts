@@ -5,7 +5,7 @@ import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { addDays, mondayOf, zonedDate, zonedDayStart } from '../src/lib/time.js';
 import { UTF8_BOM } from '../src/lib/csv.js';
-import { prisma, setupApp, signedIn } from './helpers.js';
+import { prisma, setupApp, signedIn, defaultWorkspaceId } from './helpers.js';
 
 const ctx = setupApp();
 const TZ = 'Asia/Jakarta'; // the default APP_TIMEZONE
@@ -16,7 +16,7 @@ let alice: Session; // Engineering, owns the projects
 let bob: Session; // Engineering
 let carol: Session; // no team
 let engId: string;
-let project: { id: string; sections: { id: string; name: string }[] };
+let project: { id: string; workspaceId: string; sections: { id: string; name: string }[] };
 const today = () => zonedDate(TZ);
 
 beforeEach(async () => {
@@ -26,7 +26,7 @@ beforeEach(async () => {
   carol = await signedIn(ctx.app, { name: 'Carol' });
   engId = (
     await prisma.team.create({
-      data: { name: 'Engineering', members: { create: [{ userId: alice.user.id }, { userId: bob.user.id }] } },
+      data: { workspaceId: await defaultWorkspaceId(), name: 'Engineering', members: { create: [{ userId: alice.user.id }, { userId: bob.user.id }] } },
     })
   ).id;
   project = (await req(alice, 'POST', '/projects', { teamId: engId, name: 'Website Redesign', color: '#112233' })).json();
@@ -49,9 +49,10 @@ type TaskInput = {
 };
 
 /** Inserts a task directly so timestamps can be set precisely. */
-function task(t: TaskInput) {
+async function task(t: TaskInput) {
   return prisma.task.create({
     data: {
+      workspaceId: project.workspaceId,
       title: t.title ?? 'Task',
       projectId: t.projectId === undefined ? project.id : t.projectId,
       sectionId: t.sectionId ?? null,
@@ -175,7 +176,7 @@ describe('GET /reports/overview', () => {
     // Carol only sees the PUBLIC project; a team filter narrows the list.
     const asCarol = (await req(carol, 'GET', '/reports/overview')).json();
     expect(asCarol.projects.map((p: { project: { name: string } }) => p.project.name)).toEqual(['Apps']);
-    const otherTeam = await prisma.team.create({ data: { name: 'Marketing' } });
+    const otherTeam = await prisma.team.create({ data: { workspaceId: await defaultWorkspaceId(), name: 'Marketing' } });
     expect((await req(bob, 'GET', `/reports/overview?teamId=${otherTeam.id}`)).json()).toEqual({
       totals: { total: 0, completed: 0, incomplete: 0, overdue: 0, projects: 0 },
       projects: [],

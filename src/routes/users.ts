@@ -4,6 +4,7 @@ import { notFound, validation } from '../errors.js';
 import { hashPassword, verifyPassword } from '../lib/password.js';
 import { toUser, toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { hexColor, idParams, parse, password } from '../lib/validate.js';
+import { activeMemberWhere, currentMember, loadMe } from '../lib/workspaces.js';
 
 const ListQuery = z.object({ q: z.string().trim().max(100).optional() });
 
@@ -19,9 +20,10 @@ const UpdateMeBody = z
 export default async function userRoutes(app: FastifyInstance) {
   app.get('/users', async (req) => {
     const { q } = parse(ListQuery, req.query);
+    const { workspaceId } = await currentMember(req);
     const users = await app.db.user.findMany({
       where: {
-        isActive: true,
+        ...activeMemberWhere(workspaceId),
         ...(q
           ? {
               OR: [
@@ -56,13 +58,18 @@ export default async function userRoutes(app: FastifyInstance) {
       where: { id: req.user.id },
       data: { name: body.name, avatarColor: body.avatarColor, passwordHash },
     });
-    return toUser(user);
+    return loadMe(app.db, user, { req });
   });
 
   app.get('/users/:id', async (req) => {
     const { id } = parse(idParams, req.params);
-    const user = await app.db.user.findUnique({ where: { id } });
-    if (!user) throw notFound('User');
-    return toUser(user);
+    const { workspaceId } = await currentMember(req);
+    // Members of the current workspace only (incl. deactivated ones, who still appear on old tasks).
+    const membership = await app.db.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId, userId: id } },
+      include: { user: true },
+    });
+    if (!membership) throw notFound('User');
+    return toUser(membership.user, { role: membership.role, isActive: membership.isActive && membership.user.isActive });
   });
 }

@@ -4,6 +4,7 @@ import { projectAccess } from './access.js';
 import { hashPassword } from './password.js';
 import { SESSION_COOKIE } from '../plugins/auth.js';
 import { currentPeriods } from './time.js';
+import { deleteWorkspace, WORKSPACE_HEADER } from './workspaces.js';
 
 /**
  * Demo data for SPEC §7. It goes through the real API (app.inject), so followers, activity and
@@ -194,9 +195,18 @@ export async function seed(app: FastifyInstance) {
   const ids = {} as Record<Who, string>;
   const cookies = {} as Record<Who, string>;
 
+  // SPEC §12: all the v1 demo data lives in the default workspace.
+  const workspace = await db.workspace.create({ data: { name: app.config.DEFAULT_WORKSPACE_NAME, color: '#4186e0' } });
   for (const u of USERS) {
     const user = await db.user.create({
-      data: { email: u.email, name: u.name, role: u.role, avatarColor: u.avatarColor, passwordHash },
+      data: {
+        email: u.email,
+        name: u.name,
+        avatarColor: u.avatarColor,
+        passwordHash,
+        lastWorkspaceId: workspace.id,
+        workspaceMemberships: { create: { workspaceId: workspace.id, role: u.role } },
+      },
     });
     ids[u.key] = user.id;
     const res = await app.inject({
@@ -209,7 +219,7 @@ export async function seed(app: FastifyInstance) {
     cookies[u.key] = `sid=${sid.value}`;
   }
 
-  const call = makeCaller(app, cookies);
+  const call = makeCaller(app, cookies, workspace.id);
 
   const mention = (body: string) => body.replace(/@\[([^\]]+)\]\((\w+)\)/g, (_m, name, key: Who) => `@[${name}](${ids[key]})`);
 
@@ -271,15 +281,35 @@ export async function seed(app: FastifyInstance) {
   taskCount += 1;
 
   const goals = await seedGoals(call, ids, teams, projectIds, currentPeriods(app.config.APP_TIMEZONE)[2]!);
+  const demo = await seedWorkspacesDemo(app);
+  if ('skipped' in demo) throw new Error(`Seeding "${ACME}" failed: ${demo.skipped}`);
 
-  return { users: USERS.length, teams: Object.keys(teams).length, projects: PROJECTS.length, tasks: taskCount, goals };
+  return {
+    workspaces: 2,
+    users: USERS.length,
+    teams: Object.keys(teams).length + 1,
+    projects: PROJECTS.length + 1,
+    tasks: taskCount + demo.tasks,
+    goals,
+  };
 }
 
 type Call = <T = { id: string }>(who: Who, method: 'POST' | 'PATCH', url: string, payload: object) => Promise<T>;
 
-function makeCaller(app: FastifyInstance, cookies: Record<Who, string>, onCreated?: (url: string, id: string) => void): Call {
+/** API calls as a seed user inside one workspace (sent as X-Workspace-Id). */
+function makeCaller(
+  app: FastifyInstance,
+  cookies: Partial<Record<Who, string>>,
+  workspaceId: string,
+  onCreated?: (url: string, id: string) => void,
+): Call {
   return async <T = { id: string }>(who: Who, method: 'POST' | 'PATCH', url: string, payload: object) => {
-    const res = await app.inject({ method, url: `/api/v1${url}`, headers: { cookie: cookies[who] }, payload });
+    const res = await app.inject({
+      method,
+      url: `/api/v1${url}`,
+      headers: { cookie: cookies[who] ?? '', [WORKSPACE_HEADER]: workspaceId },
+      payload,
+    });
     if (res.statusCode >= 300) throw new Error(`Seed ${method} ${url} failed (${res.statusCode}): ${res.body}`);
     const body = res.json();
     if (method === 'POST' && onCreated && body?.id) onCreated(url, body.id);
@@ -296,7 +326,15 @@ function makeCaller(app: FastifyInstance, cookies: Record<Who, string>, onCreate
  */
 export async function seedGoalsOnly(app: FastifyInstance): Promise<{ goals: number } | { skipped: string }> {
   const db = app.db;
-  if ((await db.goal.count()) > 0) return { skipped: 'goals already exist' };
+  // The demo data's workspace: the oldest one admin@example.com is an active ADMIN of.
+  const adminOf = await db.workspaceMember.findFirst({
+    where: { user: { email: 'admin@example.com' }, role: 'ADMIN', isActive: true },
+    orderBy: [{ joinedAt: 'asc' }, { workspaceId: 'asc' }],
+    select: { workspaceId: true },
+  });
+  if (!adminOf) return { skipped: 'admin@example.com is missing or no longer an admin' };
+  const { workspaceId } = adminOf;
+  if ((await db.goal.count({ where: { workspaceId } })) > 0) return { skipped: 'goals already exist' };
 
   const users = await db.user.findMany({ where: { email: { in: USERS.map((u) => u.email) } } });
   const ids = {} as Record<Who, string>;
@@ -305,18 +343,17 @@ export async function seedGoalsOnly(app: FastifyInstance): Promise<{ goals: numb
     if (!found?.isActive) return { skipped: `seed user ${u.email} is missing or inactive` };
     ids[u.key] = found.id;
   }
-  if (users.find((u) => u.id === ids.admin)!.role !== 'ADMIN') return { skipped: 'admin@example.com is no longer an admin' };
 
   const teams: Record<string, string> = {};
   for (const [name, member] of [['Engineering', 'bob'], ['Marketing', 'alice']] as const) {
-    const team = await db.team.findFirst({ where: { name }, select: { id: true } });
+    const team = await db.team.findFirst({ where: { name, workspaceId }, select: { id: true } });
     if (!team) return { skipped: `team "${name}" is missing` };
     const isMember = await db.teamMember.count({ where: { teamId: team.id, userId: ids[member] } });
     if (!isMember) return { skipped: `${member}@example.com is no longer in team "${name}"` };
     teams[name] = team.id;
   }
 
-  const project = await db.project.findFirst({ where: { name: 'Mobile App v2' }, select: { id: true } });
+  const project = await db.project.findFirst({ where: { name: 'Mobile App v2', workspaceId }, select: { id: true } });
   if (!project) return { skipped: 'project "Mobile App v2" is missing' };
   const bob = users.find((u) => u.id === ids.bob)!;
   const bobSees = await projectAccess(db, bob, project.id).then(() => true, () => false);
@@ -325,7 +362,7 @@ export async function seedGoalsOnly(app: FastifyInstance): Promise<{ goals: numb
   const cookies = {} as Record<Who, string>;
   for (const u of USERS) cookies[u.key] = `${SESSION_COOKIE}=${app.jwt.sign({ sub: ids[u.key] })}`;
   const createdGoals: string[] = [];
-  const call = makeCaller(app, cookies, (url, id) => {
+  const call = makeCaller(app, cookies, workspaceId, (url, id) => {
     if (url === '/goals') createdGoals.push(id);
   });
   try {
@@ -419,4 +456,80 @@ async function seedGoals(
   await update('alice', newsletter.id, 'ON_TRACK', 'Referral program design is done; launch next sprint.');
 
   return 6;
+}
+
+// --- SPEC §12: second demo workspace ------------------------------------------------------
+
+export const ACME = 'Acme Pilot';
+
+const ACME_TASKS: { title: string; section: number; assignee?: 'alice' | 'bob'; due?: number; priority?: 'LOW' | 'MEDIUM' | 'HIGH'; done?: boolean }[] = [
+  { title: 'Kick-off call with Acme', section: 2, assignee: 'alice', due: -6, priority: 'HIGH', done: true },
+  { title: 'Collect pilot success criteria', section: 2, assignee: 'alice', due: -2, priority: 'MEDIUM', done: true },
+  { title: 'Provision pilot accounts', section: 1, assignee: 'bob', due: 1, priority: 'HIGH' },
+  { title: 'Import Acme’s existing projects', section: 1, assignee: 'bob', due: 4, priority: 'MEDIUM' },
+  { title: 'Admin training session', section: 0, assignee: 'alice', due: 6 },
+  { title: 'Weekly check-in agenda', section: 0, assignee: 'alice', due: 8, priority: 'LOW' },
+  { title: 'Pilot feedback survey', section: 0, assignee: 'bob', due: 15 },
+  { title: 'Go / no-go review', section: 0, due: 21, priority: 'HIGH' },
+];
+
+/**
+ * Adds the "Acme Pilot" workspace: alice ADMIN, bob MEMBER, one team and one project with 8 tasks.
+ * Used by the full seed and by `npm run seed -- --workspaces-demo` on a live database: idempotent
+ * (skips if the workspace exists) and additive (nothing existing is changed, not even anyone's
+ * current workspace). Sessions are minted directly. If a step fails, the workspace is removed again.
+ */
+export async function seedWorkspacesDemo(app: FastifyInstance): Promise<{ tasks: number } | { skipped: string }> {
+  const db = app.db;
+  if (await db.workspace.findFirst({ where: { name: ACME }, select: { id: true } })) {
+    return { skipped: `workspace "${ACME}" already exists` };
+  }
+  const ids = {} as Record<'alice' | 'bob', string>;
+  for (const key of ['alice', 'bob'] as const) {
+    const user = await db.user.findUnique({ where: { email: `${key}@example.com` } });
+    if (!user?.isActive) return { skipped: `seed user ${key}@example.com is missing or inactive` };
+    ids[key] = user.id;
+  }
+
+  const workspace = await db.workspace.create({
+    data: {
+      name: ACME,
+      color: '#f06a6a',
+      members: { create: [{ userId: ids.alice, role: 'ADMIN' }, { userId: ids.bob, role: 'MEMBER' }] },
+    },
+  });
+  const cookie = (id: string) => `${SESSION_COOKIE}=${app.jwt.sign({ sub: id })}`;
+  const call = makeCaller(app, { alice: cookie(ids.alice), bob: cookie(ids.bob) }, workspace.id);
+  try {
+    const team = await call('alice', 'POST', '/teams', { name: 'Pilot Team', description: 'Everyone running the Acme pilot.' });
+    await call('alice', 'POST', `/teams/${team.id}/members`, { userId: ids.bob });
+    const project = await call<{ id: string; sections: { id: string }[] }>('alice', 'POST', '/projects', {
+      teamId: team.id,
+      name: 'Pilot Rollout',
+      description: 'Six-week pilot of Mekari Project with the Acme operations team.',
+      color: '#f06a6a',
+      privacy: 'TEAM',
+      defaultView: 'BOARD',
+    });
+    const taskIds: Record<string, string> = {};
+    for (const t of ACME_TASKS) {
+      const task = await call('alice', 'POST', '/tasks', {
+        title: t.title,
+        projectId: project.id,
+        sectionId: project.sections[t.section]!.id,
+        assigneeId: t.assignee ? ids[t.assignee] : undefined,
+        dueDate: t.due === undefined ? undefined : dayOffset(t.due),
+        priority: t.priority,
+      });
+      taskIds[t.title] = task.id;
+      if (t.done) await call(t.assignee ?? 'alice', 'PATCH', `/tasks/${task.id}`, { completed: true });
+    }
+    await call('bob', 'POST', `/tasks/${taskIds['Provision pilot accounts']}/comments`, {
+      body: 'Accounts are ready except SSO; waiting on Acme IT.',
+    });
+    return { tasks: ACME_TASKS.length };
+  } catch (err) {
+    await db.$transaction((tx) => deleteWorkspace(tx, workspace.id));
+    throw err;
+  }
 }

@@ -7,9 +7,10 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum Role {
+enum WorkspaceRole {
   ADMIN
   MEMBER
+  GUEST
 }
 
 enum ProjectPrivacy {
@@ -82,15 +83,54 @@ enum KeyResultMetric {
   BOOLEAN
 }
 
+// --- Workspaces (SPEC §12) ----------------------------------------------------
+
+model Workspace {
+  id             String   @id @default(uuid()) @db.Uuid
+  name           String
+  isOrganization Boolean  @default(false)
+  /// Lowercase company domain; set iff isOrganization.
+  domain         String?  @unique
+  color          String
+  createdAt      DateTime @default(now())
+
+  members       WorkspaceMember[]
+  lastUsedBy    User[]            @relation("LastWorkspace")
+  invites       Invite[]
+  teams         Team[]
+  projects      Project[]
+  tasks         Task[]
+  goals         Goal[]
+  notifications Notification[]
+}
+
+model WorkspaceMember {
+  workspaceId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        WorkspaceRole @default(MEMBER)
+  isActive    Boolean       @default(true)
+  joinedAt    DateTime      @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, userId])
+  @@index([userId])
+}
+
 model User {
-  id           String   @id @default(uuid()) @db.Uuid
-  email        String   @unique
-  name         String
-  passwordHash String
-  role         Role     @default(MEMBER)
-  isActive     Boolean  @default(true)
-  avatarColor  String
-  createdAt    DateTime @default(now())
+  id              String   @id @default(uuid()) @db.Uuid
+  email           String   @unique
+  name            String
+  passwordHash    String
+  /// Global kill switch (create-admin / DB only). Workspace admins manage WorkspaceMember.isActive.
+  isActive        Boolean  @default(true)
+  avatarColor     String
+  lastWorkspaceId String?  @db.Uuid
+  createdAt       DateTime @default(now())
+
+  lastWorkspace        Workspace?        @relation("LastWorkspace", fields: [lastWorkspaceId], references: [id], onDelete: SetNull)
+  workspaceMemberships WorkspaceMember[]
 
   invitesSent          Invite[]        @relation("InvitedBy")
   teamMemberships      TeamMember[]
@@ -109,29 +149,36 @@ model User {
 }
 
 model Invite {
-  id          String    @id @default(uuid()) @db.Uuid
+  id          String        @id @default(uuid()) @db.Uuid
+  workspaceId String        @db.Uuid
   email       String
-  role        Role      @default(MEMBER)
-  token       String    @unique
-  invitedById String    @db.Uuid
+  role        WorkspaceRole @default(MEMBER)
+  token       String        @unique
+  invitedById String        @db.Uuid
   expiresAt   DateTime
   acceptedAt  DateTime?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime      @default(now())
 
-  invitedBy User @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
+  invitedBy User      @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([email])
+  @@index([workspaceId])
 }
 
 model Team {
   id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @db.Uuid
   name        String
   description String?
   createdAt   DateTime @default(now())
 
-  members  TeamMember[]
-  projects Project[]
-  goals    Goal[]
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  members   TeamMember[]
+  projects  Project[]
+  goals     Goal[]
+
+  @@index([workspaceId])
 }
 
 model TeamMember {
@@ -147,6 +194,8 @@ model TeamMember {
 
 model Project {
   id          String         @id @default(uuid()) @db.Uuid
+  /// Always its team's workspace.
+  workspaceId String         @db.Uuid
   teamId      String         @db.Uuid
   ownerId     String         @db.Uuid
   name        String
@@ -158,14 +207,16 @@ model Project {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
-  team     Team            @relation(fields: [teamId], references: [id], onDelete: Restrict)
-  owner    User            @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Restrict)
-  members  ProjectMember[]
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  team      Team            @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  owner     User            @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  members   ProjectMember[]
   sections  Section[]
   tasks     Task[]
   goalLinks GoalProject[]
 
   @@index([teamId])
+  @@index([workspaceId])
 }
 
 model ProjectMember {
@@ -194,6 +245,8 @@ model Section {
 
 model Task {
   id          String    @id @default(uuid()) @db.Uuid
+  /// Set for every task; a project task always has its project's workspace.
+  workspaceId String    @db.Uuid
   projectId   String?   @db.Uuid
   sectionId   String?   @db.Uuid
   parentId    String?   @db.Uuid
@@ -210,6 +263,7 @@ model Task {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   project       Project?       @relation(fields: [projectId], references: [id], onDelete: Cascade)
   // Deleting a section moves its tasks to sectionId = null.
   section       Section?       @relation(fields: [sectionId], references: [id], onDelete: SetNull)
@@ -225,6 +279,7 @@ model Task {
   @@index([projectId, sectionId, position])
   @@index([parentId])
   @@index([assigneeId])
+  @@index([workspaceId])
 }
 
 model TaskFollower {
@@ -267,25 +322,29 @@ model Activity {
 }
 
 model Notification {
-  id        String           @id @default(uuid()) @db.Uuid
-  userId    String           @db.Uuid
-  actorId   String           @db.Uuid
-  taskId    String?          @db.Uuid
-  type      NotificationType
-  read      Boolean          @default(false)
-  createdAt DateTime         @default(now())
+  id          String           @id @default(uuid()) @db.Uuid
+  workspaceId String           @db.Uuid
+  userId      String           @db.Uuid
+  actorId     String           @db.Uuid
+  taskId      String?          @db.Uuid
+  type        NotificationType
+  read        Boolean          @default(false)
+  createdAt   DateTime         @default(now())
 
-  user  User  @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
-  actor User  @relation("NotificationActor", fields: [actorId], references: [id], onDelete: Cascade)
-  task  Task? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user      User      @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  actor     User      @relation("NotificationActor", fields: [actorId], references: [id], onDelete: Cascade)
+  task      Task?     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([userId, read, createdAt])
+  @@index([workspaceId, userId, read])
 }
 
 // --- Goals / OKRs (SPEC §10) -------------------------------------------------
 
 model Goal {
   id             String             @id @default(uuid()) @db.Uuid
+  workspaceId    String             @db.Uuid
   title          String
   description    String?
   ownerId        String             @db.Uuid
@@ -302,6 +361,7 @@ model Goal {
   createdAt      DateTime           @default(now())
   updatedAt      DateTime           @updatedAt
 
+  workspace  Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   owner      User          @relation("GoalOwner", fields: [ownerId], references: [id], onDelete: Restrict)
   // Teams with goals can't be deleted (API returns 409), like teams with projects.
   team       Team?         @relation(fields: [teamId], references: [id], onDelete: Restrict)
@@ -315,6 +375,7 @@ model Goal {
   @@index([parentId])
   @@index([teamId])
   @@index([timePeriod])
+  @@index([workspaceId])
 }
 
 model KeyResult {
