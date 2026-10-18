@@ -47,7 +47,9 @@ docker compose exec be npm run create-admin -- \
   --email you@company.com --name "Your Name" --password 'a-strong-password'
 ```
 Running it for an existing email promotes that user to ADMIN (`--name`/`--password` optional).
-Then log in and invite everyone else from **Admin → Users**.
+The user becomes ADMIN of the default workspace (`DEFAULT_WORKSPACE_NAME`, default `Mekari`),
+which is created if the database has none. Then log in and invite everyone else from
+**Workspace settings → Invites**.
 
 For a demo/staging stack you can load sample data instead (`docker compose exec be npm run seed`,
 once the backend ships a compiled seed script). The seed creates `admin@example.com` /
@@ -80,8 +82,33 @@ docker compose up -d --build   # migrations apply automatically when be restarts
 ```
 Take a `pg_dump` before upgrading anything that ships a migration.
 
-**Upgrading to v1.2 (workspaces):** the migration moves everyone into one workspace named
-"Mekari". Users who were deactivated before v1.2 stay deactivated globally, so re-activating
+### Upgrading to v1.2 (workspaces)
+v1.2 adds workspaces (SPEC §12), and its migration rewrites existing data in place:
+- creates one workspace named `DEFAULT_WORKSPACE_NAME` (default `Mekari`, not an organization);
+- moves every team, project, task, goal, notification and invite into it;
+- turns each user's role into a membership of that workspace (inactive users stay inactive);
+- drops the old `User.role` column.
+
+No data is deleted, but there's no down-migration, so **take a `pg_dump` first** (see Backups)
+and keep it until you've checked the upgrade:
+```sh
+docker compose exec -T postgres pg_dump -U asana -d asana -Fc > asana-pre-v1.2-$(date +%F).dump
+# set DEFAULT_WORKSPACE_NAME in .env now if you don't want "Mekari" (see below)
+git -C ../ pull && git -C ../../asana-clone-fe pull
+docker compose up -d --build
+docker compose logs be | grep -i migrat   # the workspaces migration should be listed as applied
+```
+The migration is plain SQL, so it can't read env vars. It takes the name from the Postgres setting
+`mekari.default_workspace_name`, and the `be` entrypoint sets that from `DEFAULT_WORKSPACE_NAME`
+before migrating. Without the compose entrypoint (e.g. running `prisma migrate deploy` yourself),
+set it by hand first: `ALTER DATABASE asana SET mekari.default_workspace_name = 'Your Name';`.
+The name only matters at this moment: changing it afterwards does nothing (rename the workspace
+in Workspace settings instead). If something looks wrong, restore the dump with the
+v1.1 images. A fresh, empty database gets no workspace from the migration; `create-admin` (or
+the seed) creates it. CI's `upgrade` job runs this migration against a database seeded with the
+last pre-v1.2 release on every PR.
+
+Users who were deactivated before v1.2 stay deactivated globally, so re-activating
 them under Workspace settings › Members isn't enough on its own. To let one log in again,
 re-enable their account in the database:
 ```sh
