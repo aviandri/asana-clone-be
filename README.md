@@ -1,6 +1,6 @@
 # asana-clone-be
 
-Backend API for the internal Asana clone. See [docs/SPEC.md](docs/SPEC.md) for the product scope and API contract.
+Backend API for **Mekari Project**, the internal project-management tool. See [docs/SPEC.md](docs/SPEC.md) for the product scope and API contract.
 
 Node 20 · TypeScript (strict) · Fastify 4 · Prisma 5 · PostgreSQL 16 · zod · Vitest
 
