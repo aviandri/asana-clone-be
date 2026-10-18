@@ -1,6 +1,7 @@
 # Mekari Project — Product & API Spec (v1)
 
-Internal project-management tool for a ~100-employee company. One workspace (the company).
+Internal project-management tool for a ~100-employee company. Multi-workspace since v1.2 (§12);
+the company is the default workspace.
 This file is the **contract** between `asana-clone-be` and `asana-clone-fe`. The copy in the BE repo
 (`docs/SPEC.md`) is canonical; the FE repo mirrors it. Changes to the contract go through the
 orchestrator — do not silently diverge.
@@ -22,7 +23,9 @@ orchestrator — do not silently diverge.
 - Inbox: notifications (assigned, commented, completed, mentioned via `@[Name](userId)`).
 - Global search (tasks, projects, users).
 
-### v1.1 (in progress): see §10 Goals/OKRs and §11 Reporting
+### v1.1: see §10 Goals/OKRs and §11 Reporting
+
+### v1.2 (in progress): see §12 Workspaces
 
 ### Later (do NOT build yet)
 Attachments, tags, custom fields, real-time (WebSocket), Google SSO, email notifications,
@@ -399,3 +402,151 @@ type WorkloadReport = {
   Workload (people × open/overdue/due-in-range, date range), Goals summary (count by status, average
   progress for a period — computed from `GET /goals`).
 - Charts: Recharts (or similar, ≤ ~120 KB gz). Accessible: every chart has a text/table alternative.
+
+## 12. Workspaces (v1.2)
+
+Modelled on Asana's *workspaces & organizations*: a **workspace** is a shared space with its own
+members, teams, projects, tasks, goals and inbox. A user can belong to several and switches between
+them. An **organization** is a workspace tied to a company email domain: people with that domain can
+join it themselves, and anyone outside the domain can only be a **guest**. Everything in §4–§11 now
+applies *within one workspace*; "ADMIN" there means **admin of that workspace**.
+
+Deliberate deviation from Asana: teams exist in every workspace (not only organizations), so all
+v1 features keep working everywhere.
+
+### Data model
+```
+Workspace        id, name, isOrganization(bool, default false), domain?(unique, lowercase, e.g. "mekari.com"),
+                 color, createdAt
+WorkspaceMember  workspaceId, userId (PK both), role(ADMIN|MEMBER|GUEST), isActive(default true), joinedAt
+User             + lastWorkspaceId?            − role   (role moves to WorkspaceMember)
+Invite           + workspaceId; role may be GUEST; unique pending (workspaceId, email)
+Team, Project, Task, Goal, Notification   + workspaceId (required, indexed)
+```
+- `Task.workspaceId` is set for every task (incl. personal tasks); a task in a project always has
+  the project's workspace. `Project.workspaceId` = its team's workspace.
+- `domain` is required when `isOrganization = true`, and must be null otherwise.
+- **Migration (must be non-destructive — the preview DB holds real data):** create one workspace
+  (`DEFAULT_WORKSPACE_NAME`, default `"Mekari"`, not an organization), backfill every row's
+  `workspaceId` with it, copy each user's old `role` into a `WorkspaceMember` (inactive users →
+  `isActive=false`), set `lastWorkspaceId`, then drop `User.role`.
+- `User.isActive = false` still blocks login globally (only settable by `npm run create-admin` /
+  DB); workspace admins manage `WorkspaceMember.isActive` instead.
+
+### Current workspace
+- Workspace-scoped requests use the header **`X-Workspace-Id`**. If it's absent, the server uses
+  `User.lastWorkspaceId`, then the user's oldest active membership. A header naming a workspace the
+  caller isn't an active member of → `404`.
+- No workspace at all (new user who left everything) → scoped endpoints return
+  `403 FORBIDDEN` with `details: [{ path: ["workspace"], message: "NO_WORKSPACE" }]`.
+- **Scoped** (lists, creates, search, reports): `/users`, `/admin/*`, `GET/POST /teams`,
+  `GET/POST /projects`, `/me/tasks`, `POST /tasks` (personal tasks), `/notifications*`, `/search`,
+  `GET/POST /goals`, `/goals/time-periods`, `/reports/*`.
+- **ID-addressed** endpoints (`/tasks/:id`, `/projects/:id…`, `/sections/:id`, `/comments/:id`,
+  `/teams/:id…`, `/goals/:id…`, `/key-results/:id`, `/notifications/:id/read`) ignore the header.
+  They resolve the resource's own workspace and require active membership there (else `404`), so
+  links always work. `Team`, `Project`, `Task`, `Goal` and `Notification` responses gain
+  `workspaceId` so the FE can switch to the right workspace.
+- **No cross-workspace references.** Assignee, follower, project or team member, goal owner, KR
+  owner, mentions → must be an active member of that workspace (`400 VALIDATION` on the field).
+  Moving a task to a project in another workspace, or a goal parent in another workspace →
+  `400 VALIDATION`. Linking a goal to a project in another workspace → `404`.
+
+### Roles
+| | ADMIN | MEMBER | GUEST |
+|---|---|---|---|
+| See projects | per §4 (admin: all) | per §4 | **only projects where they're a `ProjectMember`** (privacy ignored) |
+| See tasks | per §4 | per §4 | tasks in those projects + personal tasks they created / are assigned / follow |
+| Create projects / teams | yes | yes | `403` |
+| Join or be added to teams | yes | yes | `400 VALIDATION` |
+| Goals (§10) | see all, create company goals | see all | can't see or create any (`GET /goals` → empty list, `GET /goals/:id` → `404`, `POST` → `403`) |
+| `/users`, `@mention` picker | all active members | all active members | only people who share a project with them |
+| Reports | per §11 | per §11 | project report on visible projects only; `/reports/workload` → `403` |
+| Workspace settings & `/admin/*` | yes | `403` | `403` |
+
+- **Organizations:** inviting an email outside `domain` as `ADMIN`/`MEMBER` → `400 VALIDATION`
+  (`role`, "External people can only be guests"). A user whose email matches `domain` can **join**
+  it as `MEMBER` without an invite.
+- **Converting to an organization** (`PATCH {isOrganization:true, domain}`): the caller's email
+  must be on `domain` (`400`); a domain already used by another workspace → `409`. Every active
+  member whose email is off-domain becomes `GUEST`. The response reports how many changed.
+  Turning it back off (`isOrganization:false`) clears `domain` and leaves roles as they are.
+- The last active ADMIN can't leave, be demoted or be deactivated → `409 CONFLICT`.
+- **Deactivating a member** (`isActive=false`) removes them from the workspace's teams and
+  project memberships (a project's last OWNER passes to the acting admin) and hides them from
+  pickers. Their tasks keep the assignee. Re-inviting or re-activating restores access (not
+  their old team or project memberships).
+
+### Shapes
+```ts
+type WorkspaceRole = 'ADMIN'|'MEMBER'|'GUEST';
+type Workspace = {
+  id: string; name: string; isOrganization: boolean; domain: string|null; color: string;
+  myRole: WorkspaceRole; memberCount: number;   // active members incl. guests
+  createdAt: string;
+};
+// User.role is now the role in the *current* workspace; for /admin/users, isActive = membership.
+type User = UserSummary & { role: WorkspaceRole; isActive: boolean; createdAt: string };
+type Me = User & { currentWorkspace: Workspace|null; workspaces: Workspace[] };   // workspaces by name
+type PendingInvite = { id: string; workspace: { id: string; name: string; color: string };
+  role: WorkspaceRole; invitedBy: UserSummary; expiresAt: string };
+```
+
+### Endpoints
+| Method | Path | Body / Query | Returns |
+|---|---|---|---|
+| GET | `/auth/me` (and `POST /auth/login`, `/auth/accept-invite`) | | `Me` |
+| GET | `/auth/invites/:token` | (no auth) | `{id, email, role, workspace:{id,name,color}, existingUser: boolean}` or 404/410 |
+| POST | `/auth/accept-invite` | `{token, name, password}`, **new users only** (`409` if the email already has an account → FE asks them to log in) | `Me`, sets cookie, current = invited workspace |
+| GET | `/workspaces` | my active memberships | `{data: Workspace[]}` |
+| POST | `/workspaces` | `{name, color?}`. Any user; caller becomes ADMIN and it becomes current | `201 Workspace` |
+| GET | `/workspaces/:id` | member | `Workspace` |
+| PATCH | `/workspaces/:id` | `{name?, color?, isOrganization?, domain?}` ADMIN | `Workspace & { convertedToGuests?: number }` |
+| DELETE | `/workspaces/:id` | `{confirmName}` must equal its name (`400`). ADMIN. Deletes everything in it | `204` |
+| POST | `/workspaces/:id/switch` | active member; sets `lastWorkspaceId` | `Workspace` |
+| POST | `/workspaces/:id/leave` | last active admin → `409`; same clean-up as deactivation | `204` |
+| GET | `/workspaces/joinable` | organizations whose `domain` matches my email and where I'm not an active member | `{data: {id,name,color,memberCount}[]}` |
+| POST | `/workspaces/:id/join` | domain must match (else `403`) | `201 Workspace` |
+| GET | `/me/invites` | pending, unexpired invites to my email | `{data: PendingInvite[]}` |
+| POST | `/me/invites/:id/accept` | email must match (else `404`); marks it accepted, adds or reactivates membership with the invite's role | `Workspace` |
+| DELETE | `/me/invites/:id` | decline | `204` |
+| POST | `/admin/invites` | `{email, role}` role ∈ ADMIN/MEMBER/GUEST; already an active member → `409` | as before + `workspaceId` |
+| GET/PATCH | `/admin/users`, `/admin/users/:id` | members of the current workspace incl. inactive; `PATCH {role?, isActive?}` edits the membership | `User` |
+
+`npm run create-admin` creates (or reuses) the user and makes them ADMIN of the default workspace,
+creating that workspace if none exists. `npm run seed` builds the default workspace
+"Mekari" (organization, domain `example.com`) with all the existing data, plus a second
+workspace **"Acme Pilot"**: alice ADMIN, bob MEMBER, guest `guest@partner.test` (password123)
+on one project, one team, one project with ~8 tasks. `npm run seed -- --workspaces-demo` adds just
+"Acme Pilot" idempotently, without touching existing data (for the preview DB).
+
+### FE (v1.2)
+- **Workspace switcher (Slack-style).** The workspace name and tile sit at the top of the sidebar,
+  and clicking them opens a menu:
+  - workspaces with a ✓ on the current one
+  - pending invites (Accept / Decline)
+  - "Join *Org* (n members)" entries from `/workspaces/joinable`
+  - "Create workspace"
+  - "Workspace settings" (admins)
+
+  Also in the profile menu, as in Asana. With ≥ 2 workspaces, a narrow **workspace rail**
+  (coloured initial tiles, unread dot) appears left of the sidebar; `Ctrl/⌘ + 1…9` switches.
+- **Switching.** The FE sends `X-Workspace-Id` on every request, from per-tab state seeded from
+  localStorage `mekari-project:workspace`, and calls `POST /workspaces/:id/switch`. It resets the
+  TanStack Query cache, navigates to Home / My Tasks and shows a toast ("Switched to Acme Pilot").
+  The content cross-fades; with reduced motion it's a plain fade.
+- **Deep links.** If a loaded task, project or goal has another `workspaceId` the user belongs to,
+  switch automatically with a toast ("Switched to X to open this task").
+- **Onboarding.** When `currentWorkspace` is null, show a friendly screen: accept an invite, join
+  a matching organization, or create a workspace.
+- **Invite page.** For an existing account, "Log in to join *X*" → after login,
+  `POST /me/invites/:id/accept`.
+- **Workspace settings** `/workspace/settings` (replaces the Admin page; ADMIN only):
+  - *General*: name, colour
+  - *Organization*: domain, and convert with a confirm dialog showing who becomes a guest
+  - *Members*: role select incl. Guest, deactivate, a Guest badge
+  - *Invites*: role incl. Guest; external emails in an org are forced to Guest in the UI
+  - *Danger zone*: delete, by typing the name
+  - plus "Leave workspace" for everyone
+- **Guest experience.** A "Guest" pill next to the workspace name. Hide Teams browse, Goals,
+  Workload and "New project", and show a small "You're a guest in X" note in the sidebar.
