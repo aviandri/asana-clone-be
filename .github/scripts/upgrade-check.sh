@@ -4,11 +4,12 @@
 #   upgrade-check.sh snapshot   # after migrating + seeding at the pre-v1.2 commit
 #   upgrade-check.sh verify     # after `prisma migrate deploy` on this commit
 #
-# `snapshot` adds the edge cases the seed lacks (an inactive user, a pending invite) and records
+# `snapshot` adds the edge cases the seed lacks (an inactive user, a pending invite, a subtask of a
+# personal task) and records
 # row counts and each user's old role in a side schema (`upgrade_check`) that Prisma ignores.
 # `verify` checks nothing was lost and, once the Workspace table exists, that the backfill
 # matches §12: one default workspace, a membership per user with their old role and active flag,
-# lastWorkspaceId set, workspaceId filled everywhere, and User.role gone.
+# lastWorkspaceId set, workspaceId filled everywhere (subtasks with their parent), and User.role gone.
 set -euo pipefail
 
 : "${DATABASE_URL:?}"
@@ -30,6 +31,10 @@ VALUES (gen_random_uuid(), 'inactive@example.com', 'Ina Active', 'x', 'MEMBER', 
 INSERT INTO "Invite" (id, email, role, token, "invitedById", "expiresAt")
 SELECT gen_random_uuid(), 'pending@example.com', 'MEMBER', 'upgrade-check-token', id, now() + interval '7 days'
 FROM "User" WHERE role = 'ADMIN' ORDER BY "createdAt" LIMIT 1;
+-- A subtask of a personal (project-less) task must land in its parent's workspace.
+INSERT INTO "Task" (id, title, "creatorId", "parentId", "updatedAt")
+SELECT gen_random_uuid(), 'Upgrade-check personal subtask', t."creatorId", t.id, now()
+FROM "Task" t WHERE t."projectId" IS NULL AND t."parentId" IS NULL ORDER BY t."createdAt" LIMIT 1;
 
 DROP SCHEMA IF EXISTS upgrade_check CASCADE;
 CREATE SCHEMA upgrade_check;
@@ -80,6 +85,8 @@ verify)
   done
   check "a task in a project has the project's workspace" \
     "SELECT NOT EXISTS (SELECT 1 FROM \"Task\" t JOIN \"Project\" p ON p.id = t.\"projectId\" WHERE t.\"workspaceId\" <> p.\"workspaceId\")"
+  check "a subtask has its parent's workspace" \
+    "SELECT NOT EXISTS (SELECT 1 FROM \"Task\" t JOIN \"Task\" p ON p.id = t.\"parentId\" WHERE t.\"workspaceId\" <> p.\"workspaceId\")"
   exit "$fail"
   ;;
 
