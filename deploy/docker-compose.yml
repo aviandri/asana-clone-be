@@ -37,6 +37,10 @@ services:
       APP_URL: ${APP_URL:-http://localhost:8080}
       # IANA zone for reports: "today", overdue, Monday week starts.
       APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Jakarta}
+      # Name of the workspace the v1.2 upgrade moves existing data into (and that create-admin
+      # creates on an empty DB). Only read when that workspace is created; renaming it later is
+      # done in Workspace settings.
+      DEFAULT_WORKSPACE_NAME: ${DEFAULT_WORKSPACE_NAME:-Mekari}
       NODE_ENV: production
       PORT: "3000"
       HOST: 0.0.0.0

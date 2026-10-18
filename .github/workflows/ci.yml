@@ -119,6 +119,89 @@ jobs:
         if: always()
         run: cat be.log || true
 
+  upgrade:
+    # Upgrade path for real deployments: build a database with the last pre-v1.2 release (migrate +
+    # seed), migrate it with this commit, then check the §12 workspace backfill lost nothing.
+    # Bump PRE_UPGRADE_REF to the previous release when a later version changes the schema.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: asana_upgrade
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      # main just before v1.2 (merge of the §12 spec, no workspace code yet).
+      PRE_UPGRADE_REF: 179bbfe134fd50b5cbdfc7808244b56ff7e81615
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5433/asana_upgrade
+      JWT_SECRET: ci-only-secret-at-least-16-chars
+      APP_URL: http://localhost:5173
+      APP_TIMEZONE: Asia/Jakarta
+      NODE_ENV: development
+      PORT: "3000"
+      HOST: 127.0.0.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PRE_UPGRADE_REF }}
+          path: old
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            old/package-lock.json
+      - name: Build a database at the pre-v1.2 release
+        working-directory: old
+        run: |
+          npm ci
+          npx prisma migrate deploy
+          npm run build
+          npm run seed
+      - name: Snapshot rows and roles
+        run: .github/scripts/upgrade-check.sh snapshot
+      - run: npm ci
+      - name: Migrate to this commit
+        run: npx prisma migrate deploy
+      - name: Verify the backfill
+        run: .github/scripts/upgrade-check.sh verify
+      - name: Log in on the upgraded data
+        run: |
+          npm run build
+          nohup npm start > be.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3000/health >/dev/null && break; sleep 1; done
+          node --input-type=module -e '
+            const base = "http://127.0.0.1:3000/api/v1";
+            const login = await fetch(base + "/auth/login", { method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ email: "alice@example.com", password: "password123" }) });
+            if (login.status !== 200) throw new Error("login " + login.status + " " + await login.text());
+            const cookie = login.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+            const me = await (await fetch(base + "/auth/me", { headers: { cookie } })).json();
+            if ("workspaces" in me) {
+              const want = process.env.DEFAULT_WORKSPACE_NAME || "Mekari";
+              if (me.currentWorkspace?.name !== want) throw new Error("currentWorkspace " + JSON.stringify(me.currentWorkspace));
+              const projects = await (await fetch(base + "/projects", { headers: { cookie } })).json();
+              if (!projects.data?.length) throw new Error("no projects visible after upgrade");
+              console.log("alice is", me.role, "in", want + ";", projects.data.length, "projects visible");
+            } else {
+              console.log("pre-v1.2 /auth/me shape; login works");
+            }'
+      - name: Backend log
+        if: always()
+        run: cat be.log || true
+
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 15
