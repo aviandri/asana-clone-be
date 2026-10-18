@@ -10,7 +10,7 @@ import { fromDateOnly, toDateOnly, toUserSummary, userSummarySelect } from '../l
 import { taskInclude, toTask, visibleTasksWhere } from '../lib/tasks.js';
 import { addDays, daysBetweenInclusive, mondayOf, zonedDate, zonedDayStart } from '../lib/time.js';
 import { dateOnly, idParams, parse, uuid } from '../lib/validate.js';
-import { activeMemberWhere, currentMember } from '../lib/workspaces.js';
+import { activeMemberWhere, currentMember, requireNotGuest } from '../lib/workspaces.js';
 
 const ReportQuery = z.object({ weeks: z.coerce.number().int().min(1).max(52).default(12) });
 const OverviewQuery = z.object({ teamId: uuid.optional() });
@@ -195,6 +195,7 @@ export default async function reportRoutes(app: FastifyInstance) {
   app.get('/reports/workload', async (req) => {
     const query = parse(WorkloadQuery, req.query);
     const member = await currentMember(req);
+    requireNotGuest(member, 'Guests can’t see workload');
     const { workspaceId } = member;
     const today = zonedDate(tz());
     const from = query.from ?? mondayOf(today);

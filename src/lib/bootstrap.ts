@@ -12,8 +12,8 @@ const UpsertAdminInput = z.object({
 
 /**
  * Creates a user, or reactivates an existing one (a given password replaces theirs), and makes
- * them an active ADMIN of the default workspace: the oldest workspace named `workspacename`,
- * created if there is none (SPEC §12). Used by `npm run create-admin` to bootstrap a deployment.
+ * them an active ADMIN of the default workspace: the oldest workspace named `workspaceName`, else
+ * the oldest workspace (it may have been renamed), created only if there is none (SPEC §12). Used by `npm run create-admin` to bootstrap a deployment.
  */
 export async function upsertAdmin(
   db: PrismaClient,
@@ -27,6 +27,7 @@ export async function upsertAdmin(
   return db.$transaction(async (tx) => {
     const workspace =
       (await tx.workspace.findFirst({ where: { name: workspaceName }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })) ??
+      (await tx.workspace.findFirst({ orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })) ??
       (await tx.workspace.create({ data: { name: workspaceName, color: '#4186e0' } }));
     const user = existing
       ? await tx.user.update({ where: { id: existing.id }, data: { isActive: true, name, passwordHash } })

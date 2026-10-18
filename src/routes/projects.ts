@@ -11,7 +11,7 @@ import {
   toSection,
 } from '../lib/projects.js';
 import { hexColor, idParams, parse, queryBool, uuid } from '../lib/validate.js';
-import { currentMember, findMember } from '../lib/workspaces.js';
+import { currentMember, findMember, requireNotGuest } from '../lib/workspaces.js';
 
 const privacy = z.enum(['PUBLIC', 'TEAM', 'PRIVATE']);
 const defaultView = z.enum(['LIST', 'BOARD', 'CALENDAR']);
@@ -68,6 +68,7 @@ export default async function projectRoutes(app: FastifyInstance) {
   app.post('/projects', async (req, reply) => {
     const body = parse(CreateBody, req.body);
     const member = await currentMember(req);
+    requireNotGuest(member, 'Guests can’t create projects');
     // The team must be in the current workspace; the project inherits it.
     const team = await app.db.team.findFirst({
       where: { id: body.teamId, workspaceId: member.workspaceId },

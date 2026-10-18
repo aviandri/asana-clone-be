@@ -31,6 +31,14 @@ describe('upsertAdmin (npm run create-admin)', () => {
     expect(await prisma.workspace.count()).toBe(1);
   });
 
+  it('uses the oldest workspace when none has the default name (it was renamed), instead of creating one', async () => {
+    const renamed = await prisma.workspace.create({ data: { name: 'Mekari Group', color: '#4186e0', createdAt: new Date('2026-01-01') } });
+    await prisma.workspace.create({ data: { name: 'Later', color: '#000000' } });
+    const { workspace } = await upsertAdmin(prisma, { email: 'boss@example.com', name: 'Boss', password: 'boss-password' });
+    expect(workspace.id).toBe(renamed.id);
+    expect(await prisma.workspace.count()).toBe(2);
+  });
+
   it('needs a name and password to create', async () => {
     await expect(upsertAdmin(prisma, { email: 'new@example.com' })).rejects.toThrow(/--name and --password/);
   });

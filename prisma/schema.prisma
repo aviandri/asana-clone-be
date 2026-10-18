@@ -164,6 +164,8 @@ model Invite {
 
   @@index([email])
   @@index([workspaceId])
+  // Plus a partial unique index on (workspaceId, email) WHERE acceptedAt IS NULL, in raw SQL
+  // (migration 20261018120000_invite_pending_unique): one pending invite per workspace and email.
 }
 
 model Team {

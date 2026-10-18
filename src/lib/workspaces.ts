@@ -1,6 +1,6 @@
 import type { FastifyRequest } from 'fastify';
 import type { Prisma, PrismaClient, User, Workspace, WorkspaceRole } from '@prisma/client';
-import { AppError, conflict, notFound } from '../errors.js';
+import { AppError, conflict, forbidden, notFound, validation } from '../errors.js';
 import { toUser } from './serialize.js';
 import { uuid } from './validate.js';
 
@@ -19,6 +19,45 @@ export const activeMemberWhere = (workspaceId: string): Prisma.UserWhereInput =>
   isActive: true,
   workspaceMemberships: { some: { workspaceId, isActive: true } },
 });
+
+/** Guests can't create teams or projects, see goals or use workload (SPEC §12 roles). */
+export function requireNotGuest(member: Member, message = 'Guests can’t do that') {
+  if (member.role === 'GUEST') throw forbidden(message);
+}
+
+/** The lowercase domain of an email address. */
+export const emailDomain = (email: string) => email.slice(email.lastIndexOf('@') + 1).toLowerCase();
+
+/** In an organization, people off its domain can only be guests (400 on `role`). */
+export function assertRoleAllowed(workspace: Pick<Workspace, 'isOrganization' | 'domain'>, email: string, role: WorkspaceRole) {
+  if (role !== 'GUEST' && workspace.isOrganization && workspace.domain && emailDomain(email) !== workspace.domain) {
+    throw validation('External people can only be guests', [{ path: ['role'], message: 'External people can only be guests' }]);
+  }
+}
+
+/**
+ * People the member may see in pickers and `/users`: every active member, except that a GUEST
+ * only sees people who share a project with them (SPEC §12).
+ */
+export function pickableUsersWhere(m: Member): Prisma.UserWhereInput {
+  const base = activeMemberWhere(m.workspaceId);
+  if (m.role !== 'GUEST') return base;
+  return {
+    AND: [
+      base,
+      {
+        OR: [
+          { id: m.user.id },
+          {
+            projectMemberships: {
+              some: { project: { workspaceId: m.workspaceId, members: { some: { userId: m.user.id } } } },
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
 
 /** The user's active membership in a workspace, or null. */
 export async function findMember(db: Db, user: User, workspaceId: string): Promise<Member | null> {
@@ -154,6 +193,8 @@ export async function loadMe(db: Db, user: User, opts: { req?: FastifyRequest; w
 
 /** 409 if the user is the workspace's last active ADMIN (they can't leave, be demoted or deactivated). */
 export async function assertNotLastAdmin(db: Db, workspaceId: string, userId: string) {
+  // Lock the workspace's admin rows, so two admins demoting each other at once can't both pass.
+  await db.$queryRaw`SELECT 1 FROM "WorkspaceMember" WHERE "workspaceId" = ${workspaceId}::uuid AND "role" = 'ADMIN' FOR UPDATE`;
   const target = await db.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId, userId } } });
   if (!target || target.role !== 'ADMIN' || !target.isActive) return;
   const others = await db.workspaceMember.count({

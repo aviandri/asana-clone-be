@@ -4,7 +4,7 @@ import { notFound, validation } from '../errors.js';
 import { hashPassword, verifyPassword } from '../lib/password.js';
 import { toUser, toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { hexColor, idParams, parse, password } from '../lib/validate.js';
-import { activeMemberWhere, currentMember, loadMe } from '../lib/workspaces.js';
+import { currentMember, loadMe, pickableUsersWhere } from '../lib/workspaces.js';
 
 const ListQuery = z.object({ q: z.string().trim().max(100).optional() });
 
@@ -20,10 +20,10 @@ const UpdateMeBody = z
 export default async function userRoutes(app: FastifyInstance) {
   app.get('/users', async (req) => {
     const { q } = parse(ListQuery, req.query);
-    const { workspaceId } = await currentMember(req);
+    const member = await currentMember(req);
     const users = await app.db.user.findMany({
       where: {
-        ...activeMemberWhere(workspaceId),
+        ...pickableUsersWhere(member),
         ...(q
           ? {
               OR: [

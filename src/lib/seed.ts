@@ -195,8 +195,11 @@ export async function seed(app: FastifyInstance) {
   const ids = {} as Record<Who, string>;
   const cookies = {} as Record<Who, string>;
 
-  // SPEC §12: all the v1 demo data lives in the default workspace.
-  const workspace = await db.workspace.create({ data: { name: app.config.DEFAULT_WORKSPACE_NAME, color: '#4186e0' } });
+  // SPEC §12: all the v1 demo data lives in the default workspace, an organization on the seed
+  // users' domain.
+  const workspace = await db.workspace.create({
+    data: { name: app.config.DEFAULT_WORKSPACE_NAME, color: '#4186e0', isOrganization: true, domain: 'example.com' },
+  });
   for (const u of USERS) {
     const user = await db.user.create({
       data: {
@@ -461,6 +464,7 @@ async function seedGoals(
 // --- SPEC §12: second demo workspace ------------------------------------------------------
 
 export const ACME = 'Acme Pilot';
+export const GUEST_EMAIL = 'guest@partner.test';
 
 const ACME_TASKS: { title: string; section: number; assignee?: 'alice' | 'bob'; due?: number; priority?: 'LOW' | 'MEDIUM' | 'HIGH'; done?: boolean }[] = [
   { title: 'Kick-off call with Acme', section: 2, assignee: 'alice', due: -6, priority: 'HIGH', done: true },
@@ -474,7 +478,8 @@ const ACME_TASKS: { title: string; section: number; assignee?: 'alice' | 'bob'; 
 ];
 
 /**
- * Adds the "Acme Pilot" workspace: alice ADMIN, bob MEMBER, one team and one project with 8 tasks.
+ * Adds the "Acme Pilot" workspace: alice ADMIN, bob MEMBER, guest@partner.test GUEST on its one
+ * project, one team and that project with 8 tasks.
  * Used by the full seed and by `npm run seed -- --workspaces-demo` on a live database: idempotent
  * (skips if the workspace exists) and additive (nothing existing is changed, not even anyone's
  * current workspace). Sessions are minted directly. If a step fails, the workspace is removed again.
@@ -498,6 +503,19 @@ export async function seedWorkspacesDemo(app: FastifyInstance): Promise<{ tasks:
       members: { create: [{ userId: ids.alice, role: 'ADMIN' }, { userId: ids.bob, role: 'MEMBER' }] },
     },
   });
+  // The guest's only workspace is Acme Pilot, so it is also their current one.
+  const guest =
+    (await db.user.findUnique({ where: { email: GUEST_EMAIL } })) ??
+    (await db.user.create({
+      data: {
+        email: GUEST_EMAIL,
+        name: 'Gita Guest',
+        avatarColor: '#aa62e3',
+        passwordHash: await hashPassword(SEED_PASSWORD),
+        lastWorkspaceId: workspace.id,
+      },
+    }));
+  await db.workspaceMember.create({ data: { workspaceId: workspace.id, userId: guest.id, role: 'GUEST' } });
   const cookie = (id: string) => `${SESSION_COOKIE}=${app.jwt.sign({ sub: id })}`;
   const call = makeCaller(app, { alice: cookie(ids.alice), bob: cookie(ids.bob) }, workspace.id);
   try {
@@ -511,6 +529,7 @@ export async function seedWorkspacesDemo(app: FastifyInstance): Promise<{ tasks:
       privacy: 'TEAM',
       defaultView: 'BOARD',
     });
+    await call('alice', 'POST', `/projects/${project.id}/members`, { userId: guest.id, role: 'EDITOR' });
     const taskIds: Record<string, string> = {};
     for (const t of ACME_TASKS) {
       const task = await call('alice', 'POST', '/tasks', {

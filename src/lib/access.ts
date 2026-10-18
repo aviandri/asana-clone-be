@@ -3,12 +3,14 @@ import { forbidden, notFound } from '../errors.js';
 import { requireMember, type Member } from './workspaces.js';
 
 /**
- * SPEC §4 within one workspace (§12). ADMIN sees every project in it. Others see a project if it is
- * PUBLIC, if it is TEAM and they are in its team, or if they are a ProjectMember.
+ * SPEC §4 within one workspace (§12). ADMIN sees every project in it. MEMBERs see a project if it
+ * is PUBLIC, if it is TEAM and they are in its team, or if they are a ProjectMember.
  */
 export function visibleProjectsWhere(m: Member): Prisma.ProjectWhereInput {
   if (m.role === 'ADMIN') return { workspaceId: m.workspaceId };
   const userId = m.user.id;
+  // GUESTs see only projects they're a member of, whatever the privacy (§12).
+  if (m.role === 'GUEST') return { workspaceId: m.workspaceId, members: { some: { userId } } };
   return {
     workspaceId: m.workspaceId,
     OR: [

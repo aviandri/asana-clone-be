@@ -49,13 +49,19 @@ describe('seed (SPEC §7)', () => {
     expect(detail.progress).toBeGreaterThan(0);
     expect(detail.progress).toBeLessThan(100);
 
-    // §12 second workspace: alice ADMIN, bob MEMBER, one team, one project, 8 tasks.
+    // §12: the default workspace is an organization on the seed users' domain.
+    expect(await prisma.workspace.findFirstOrThrow({ where: { name: 'Mekari' } })).toMatchObject({ isOrganization: true, domain: 'example.com' });
+    // Second workspace: alice ADMIN, bob MEMBER, a guest on its one project, one team, 8 tasks.
     const acme = await prisma.workspace.findFirstOrThrow({ where: { name: 'Acme Pilot' }, include: { members: { include: { user: true } } } });
     expect(Object.fromEntries(acme.members.map((m) => [m.user.email, m.role]))).toEqual({
       'alice@example.com': 'ADMIN',
       'bob@example.com': 'MEMBER',
+      'guest@partner.test': 'GUEST',
     });
-    expect((await prisma.project.findMany({ where: { workspaceId: acme.id } })).map((p) => p.name)).toEqual(['Pilot Rollout']);
+    const acmeProjects = await prisma.project.findMany({ where: { workspaceId: acme.id }, include: { members: { include: { user: true } } } });
+    expect(acmeProjects.map((p) => p.name)).toEqual(['Pilot Rollout']);
+    expect(acmeProjects[0]!.members.map((m) => m.user.email)).toContain('guest@partner.test');
+    expect(await login(ctx.app, 'guest@partner.test', SEED_PASSWORD)).toMatch(/^sid=/);
     expect(await prisma.task.count({ where: { workspaceId: acme.id, project: { workspaceId: acme.id } } })).toBe(8);
 
     await resetDatabase(prisma);

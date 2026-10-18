@@ -21,7 +21,7 @@ import { POSITION_STEP } from '../lib/projects.js';
 import { userSummarySelect } from '../lib/serialize.js';
 import { currentPeriods, sortPeriods, TIME_PERIOD } from '../lib/time.js';
 import { idParams, parse, queryBool, uuid } from '../lib/validate.js';
-import { activeMemberWhere, currentMember } from '../lib/workspaces.js';
+import { activeMemberWhere, currentMember, requireNotGuest } from '../lib/workspaces.js';
 
 const goalStatus = z.enum(['NO_STATUS', 'ON_TRACK', 'AT_RISK', 'OFF_TRACK', 'ACHIEVED', 'PARTIAL', 'MISSED', 'DROPPED']);
 const progressSource = z.enum(['KEY_RESULTS', 'SUB_GOALS', 'PROJECTS', 'MANUAL']);
@@ -106,12 +106,14 @@ function normaliseKr(kr: KrValues): KrValues {
 export default async function goalRoutes(app: FastifyInstance) {
   const db = app.db;
 
-  /** Goal and KR owners must be active members of the goal's workspace (SPEC §12). */
+  /** Goal and KR owners must be active, non-guest members of the goal's workspace (SPEC §12). */
   async function assertActiveMember(workspaceId: string, id: string, path: string) {
     const ok = await db.user.count({ where: { id, ...activeMemberWhere(workspaceId) } });
     if (!ok) {
       throw validation('User is not an active member of this workspace', [{ path: [path], message: 'Not an active workspace member' }]);
     }
+    const guest = await db.workspaceMember.count({ where: { workspaceId, userId: id, role: 'GUEST' } });
+    if (guest) throw validation('Guests can’t own goals', [{ path: [path], message: 'Guests can’t own goals' }]);
   }
 
   async function assertTeamInWorkspace(id: string, workspaceId: string) {
@@ -147,6 +149,7 @@ export default async function goalRoutes(app: FastifyInstance) {
   app.get('/goals', async (req) => {
     const query = parse(ListQuery, req.query);
     const member = await currentMember(req);
+    if (member.role === 'GUEST') return { data: [] }; // guests can't see goals (SPEC §12)
     const [rows, snap, viewer] = await Promise.all([
       db.goal.findMany({
         where: {
@@ -167,14 +170,16 @@ export default async function goalRoutes(app: FastifyInstance) {
   });
 
   app.get('/goals/time-periods', async (req) => {
-    const { workspaceId } = await currentMember(req);
-    const used = await db.goal.findMany({ where: { workspaceId }, distinct: ['timePeriod'], select: { timePeriod: true } });
+    const { workspaceId, role } = await currentMember(req);
+    // Guests get only the current periods, so used periods don't leak.
+    const used = role === 'GUEST' ? [] : await db.goal.findMany({ where: { workspaceId }, distinct: ['timePeriod'], select: { timePeriod: true } });
     return { data: sortPeriods([...used.map((u) => u.timePeriod), ...currentPeriods(app.config.APP_TIMEZONE)]) };
   });
 
   app.post('/goals', async (req, reply) => {
     const body = parse(CreateGoalBody, req.body);
     const member = await currentMember(req);
+    requireNotGuest(member, 'Guests can’t create goals');
     const { workspaceId } = member;
     const viewer = await loadViewer(db, member);
     const level = { isCompany: body.isCompany ?? false, teamId: body.teamId ?? null };

@@ -5,7 +5,7 @@ import { projectInclude, toProject } from '../lib/projects.js';
 import { toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { taskInclude, toTask, visibleTasksWhere } from '../lib/tasks.js';
 import { parse } from '../lib/validate.js';
-import { activeMemberWhere, currentMember } from '../lib/workspaces.js';
+import { currentMember, pickableUsersWhere } from '../lib/workspaces.js';
 
 const SearchQuery = z.object({ q: z.string().trim().min(2, 'Search needs at least 2 characters').max(100) });
 const PER_KIND = 10;
@@ -29,7 +29,7 @@ export default async function searchRoutes(app: FastifyInstance) {
         take: PER_KIND,
       }),
       app.db.user.findMany({
-        where: { AND: [activeMemberWhere(member.workspaceId), { OR: [{ name: contains }, { email: contains }] }] },
+        where: { AND: [pickableUsersWhere(member), { OR: [{ name: contains }, { email: contains }] }] },
         select: userSummarySelect,
         orderBy: { name: 'asc' },
         take: PER_KIND,
