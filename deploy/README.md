@@ -1,7 +1,22 @@
-# Deploying with docker-compose
+# Deploying Mekari Project with docker-compose
 
 Stack: `postgres` (16, named volume `pgdata`) → `be` (Fastify, port 3000, internal only) →
 `fe` (nginx on `${HTTP_PORT:-8080}`, serves the SPA and proxies `/api/` + `/health` to `be`).
+
+## Naming
+The product is **Mekari Project**. Several technical identifiers keep the original `asana` names on
+purpose, because renaming them would detach a running deployment from its data:
+
+| Identifier | Value | Why it stays |
+|---|---|---|
+| Compose project | `asana-clone` | Container and network names derive from it |
+| Postgres volume | `asana-clone_pgdata` (pinned with `name:`) | Holds all data; a new name means an empty DB |
+| DB user / database | `asana` / `asana` | Existing clusters were initialised with them |
+| Repos | `asana-clone-be`, `asana-clone-fe` | Unchanged unless the GitHub repos are renamed |
+
+If you ever rename the compose project, the pinned volume keeps the data attached. Compose will warn
+that the volume "was created for project asana-clone"; that's expected, and it still uses it. Take a
+`pg_dump` first anyway.
 
 ## First start
 ```sh

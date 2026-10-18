@@ -1,8 +1,11 @@
-# Full stack: postgres + backend + frontend (nginx serving the SPA, proxying /api to be).
+# Mekari Project, full stack: postgres + backend + frontend (nginx serving the SPA, proxying /api to be).
 # Expects both repos cloned side by side:
 #   ./asana-clone-be   (this repo; run compose from asana-clone-be/deploy)
 #   ./asana-clone-fe
 # Usage: cp .env.example .env && edit && docker compose up -d --build
+#
+# The compose project, DB user/database and repo paths keep their original "asana" names on
+# purpose: renaming them would detach existing containers and data. See README "Naming".
 name: asana-clone
 
 services:
@@ -53,3 +56,6 @@ services:
 
 volumes:
   pgdata:
+    # Pinned to the name compose already derived (<project>_pgdata), so renaming the compose
+    # project later can't silently start an empty database.
+    name: asana-clone_pgdata
