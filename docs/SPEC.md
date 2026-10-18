@@ -157,7 +157,7 @@ type Notification = {
 ### Users & admin
 | Method | Path | Body / Query | Returns |
 |---|---|---|---|
-| GET | `/users` | `?q=` (name/email contains, active only) | `{data: UserSummary[]}` |
+| GET | `/users` | `?q=` (name/email contains, active only) | `{data: (UserSummary & {role: WorkspaceRole})[]}` (role in the current workspace, §12 W8) |
 | GET | `/users/:id` | | `User` |
 | PATCH | `/users/me` | `{name?, avatarColor?, currentPassword?, newPassword?}` | `User` |
 | GET | `/admin/users` | ADMIN | `{data: User[]}` (incl. inactive) |
@@ -570,3 +570,6 @@ on one project, one team, one project with ~8 tasks. `npm run seed -- --workspac
   memberships become EDITOR; a project left without an OWNER passes to the acting admin (to the
   longest-standing other admin if the admin demoted themselves), as with deactivation. Guests also
   only find people who share a project with them by id (`GET /users/:id` → `404` otherwise).
+- **W8** `GET /users` entries include `role` (`UserSummary & { role: WorkspaceRole }`), the person's
+  role in the current workspace, for every caller incl. guests (who only see co-members). Guests are
+  badged in pickers, and the FE doesn't offer them Owner (W7) or goal ownership (W2).

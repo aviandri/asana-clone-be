@@ -33,10 +33,11 @@ export default async function userRoutes(app: FastifyInstance) {
             }
           : {}),
       },
-      select: userSummarySelect,
+      select: { ...userSummarySelect, workspaceMemberships: { where: { workspaceId: member.workspaceId }, select: { role: true } } },
       orderBy: { name: 'asc' },
     });
-    return { data: users.map(toUserSummary) };
+    // Each entry carries its role in the current workspace, so pickers can badge guests (W8).
+    return { data: users.map((u) => ({ ...toUserSummary(u), role: u.workspaceMemberships[0]!.role })) };
   });
 
   // Registered before /users/:id so "me" isn't parsed as an id.

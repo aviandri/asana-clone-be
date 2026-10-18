@@ -12,10 +12,39 @@ describe('GET /users', () => {
 
     const all = await ctx.app.inject({ method: 'GET', url: '/api/v1/users', headers: { cookie } });
     expect(all.json().data.map((u: { name: string }) => u.name)).toEqual(['Alice Smith', 'Bob', 'Zed']);
-    expect(Object.keys(all.json().data[0]).sort()).toEqual(['avatarColor', 'email', 'id', 'name']);
+    expect(Object.keys(all.json().data[0]).sort()).toEqual(['avatarColor', 'email', 'id', 'name', 'role']);
 
     const q = await ctx.app.inject({ method: 'GET', url: '/api/v1/users?q=SMITH', headers: { cookie } });
     expect(q.json().data.map((u: { name: string }) => u.name)).toEqual(['Alice Smith', 'Bob']);
+  });
+
+  it('includes each person’s role in the current workspace, for guest callers too (W8)', async () => {
+    const admin = await signedIn(ctx.app, { name: 'Ada', role: 'ADMIN' });
+    const guest = await signedIn(ctx.app, { name: 'Gus', role: 'GUEST' });
+    await createUser({ name: 'Mo' });
+    const team = (await ctx.app.inject({ method: 'POST', url: '/api/v1/teams', headers: { cookie: admin.cookie }, payload: { name: 'T' } })).json();
+    const project = (
+      await ctx.app.inject({
+        method: 'POST',
+        url: '/api/v1/projects',
+        headers: { cookie: admin.cookie },
+        payload: { teamId: team.id, name: 'P', privacy: 'PUBLIC' },
+      })
+    ).json();
+    await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/projects/${project.id}/members`,
+      headers: { cookie: admin.cookie },
+      payload: { userId: guest.user.id },
+    });
+    const roles = async (cookie: string) =>
+      (await ctx.app.inject({ method: 'GET', url: '/api/v1/users', headers: { cookie } }))
+        .json()
+        .data.map((u: { name: string; role: string }) => [u.name, u.role]);
+
+    expect(await roles(admin.cookie)).toEqual([['Ada', 'ADMIN'], ['Gus', 'GUEST'], ['Mo', 'MEMBER']]);
+    // A guest sees only co-members (Mo isn't on their project), with roles.
+    expect(await roles(guest.cookie)).toEqual([['Ada', 'ADMIN'], ['Gus', 'GUEST']]);
   });
 });
 
