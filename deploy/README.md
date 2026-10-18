@@ -93,14 +93,19 @@ No data is deleted, but there's no down-migration, so **take a `pg_dump` first**
 and keep it until you've checked the upgrade:
 ```sh
 docker compose exec -T postgres pg_dump -U asana -d asana -Fc > asana-pre-v1.2-$(date +%F).dump
-# set DEFAULT_WORKSPACE_NAME in .env now if you don't want "Mekari"
+# set DEFAULT_WORKSPACE_NAME in .env now if you don't want "Mekari" (see below)
 git -C ../ pull && git -C ../../asana-clone-fe pull
 docker compose up -d --build
 docker compose logs be | grep -i migrat   # the workspaces migration should be listed as applied
 ```
-`DEFAULT_WORKSPACE_NAME` only matters at this moment: changing it afterwards does nothing (rename
-the workspace in Workspace settings instead). If something looks wrong, restore the dump with the
-v1.1 images. CI's `upgrade` job runs this migration against a database seeded with the
+The migration is plain SQL, so it can't read env vars. It takes the name from the Postgres setting
+`mekari.default_workspace_name`, and the `be` entrypoint sets that from `DEFAULT_WORKSPACE_NAME`
+before migrating. Without the compose entrypoint (e.g. running `prisma migrate deploy` yourself),
+set it by hand first: `ALTER DATABASE asana SET mekari.default_workspace_name = 'Your Name';`.
+The name only matters at this moment: changing it afterwards does nothing (rename the workspace
+in Workspace settings instead). If something looks wrong, restore the dump with the
+v1.1 images. A fresh, empty database gets no workspace from the migration; `create-admin` (or
+the seed) creates it. CI's `upgrade` job runs this migration against a database seeded with the
 last pre-v1.2 release on every PR.
 
 ## Logs

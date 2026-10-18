@@ -149,6 +149,8 @@ jobs:
       NODE_ENV: development
       PORT: "3000"
       HOST: 127.0.0.1
+      # Not the default, with a quote: proves the entrypoint hands the name to the SQL migration.
+      DEFAULT_WORKSPACE_NAME: "O'Brien & Co"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -172,8 +174,8 @@ jobs:
       - name: Snapshot rows and roles
         run: .github/scripts/upgrade-check.sh snapshot
       - run: npm ci
-      - name: Migrate to this commit
-        run: npx prisma migrate deploy
+      - name: Migrate to this commit (through the image's entrypoint)
+        run: sh deploy/docker-entrypoint.sh true
       - name: Verify the backfill
         run: .github/scripts/upgrade-check.sh verify
       - name: Log in on the upgraded data
