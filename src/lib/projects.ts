@@ -17,6 +17,7 @@ type ProjectRow = Prisma.ProjectGetPayload<{ include: ReturnType<typeof projectI
 export function toProject(p: ProjectRow) {
   return {
     id: p.id,
+    workspaceId: p.workspaceId,
     teamId: p.teamId,
     name: p.name,
     description: p.description,

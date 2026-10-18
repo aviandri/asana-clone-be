@@ -24,6 +24,8 @@ const EnvSchema = z.object({
     .string()
     .default('Asia/Jakarta')
     .refine(isValidTimeZone, 'APP_TIMEZONE must be an IANA time zone, e.g. Asia/Jakarta'),
+  /** Name of the workspace `create-admin` and `seed` create when none exists (SPEC §12). */
+  DEFAULT_WORKSPACE_NAME: z.string().trim().min(1).max(100).default('Mekari'),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

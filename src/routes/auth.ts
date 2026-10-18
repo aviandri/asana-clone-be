@@ -2,8 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AppError, conflict, notFound, unauthorized } from '../errors.js';
 import { DUMMY_HASH, hashPassword, randomAvatarColor, verifyPassword } from '../lib/password.js';
-import { toUser } from '../lib/serialize.js';
 import { email, parse, password } from '../lib/validate.js';
+import { loadMe } from '../lib/workspaces.js';
 
 const LoginBody = z.object({ email, password: z.string().min(1).max(200) });
 const AcceptInviteBody = z.object({
@@ -26,7 +26,7 @@ export default async function authRoutes(app: FastifyInstance) {
     if (!user || !ok) throw unauthorized('Invalid email or password');
     if (!user.isActive) throw unauthorized('This account has been deactivated');
     await app.setSession(reply, user.id);
-    return toUser(user);
+    return loadMe(app.db, user, { req });
   });
 
   app.post('/logout', async (_req, reply) => {
@@ -34,7 +34,7 @@ export default async function authRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  app.get('/me', async (req) => toUser(req.user));
+  app.get('/me', async (req) => loadMe(app.db, req.user, { req }));
 
   async function findUsableInvite(token: string) {
     const invite = await app.db.invite.findUnique({ where: { token } });
@@ -64,17 +64,19 @@ export default async function authRoutes(app: FastifyInstance) {
         data: { acceptedAt: new Date() },
       });
       if (claimed.count === 0) throw new AppError('GONE', 'This invite has already been used');
+      // The invited workspace becomes the new user's first and current workspace.
       return tx.user.create({
         data: {
           email: invite.email,
           name: body.name,
           passwordHash,
-          role: invite.role,
           avatarColor: randomAvatarColor(),
+          lastWorkspaceId: invite.workspaceId,
+          workspaceMemberships: { create: { workspaceId: invite.workspaceId, role: invite.role } },
         },
       });
     });
     await app.setSession(reply, user.id);
-    return toUser(user);
+    return loadMe(app.db, user, { workspaceId: invite.workspaceId });
   });
 }

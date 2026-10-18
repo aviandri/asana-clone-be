@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient, User } from '@prisma/client';
 import { notFound } from '../errors.js';
 import { projectAccess, visibleProjectsWhere } from './access.js';
+import { requireMember, type Member } from './workspaces.js';
 import { toDateOnly, toUserSummary, userSummarySelect } from './serialize.js';
 
 /** Prisma include for the `Task` shape (SPEC §5). */
@@ -17,6 +18,7 @@ export type TaskRow = Prisma.TaskGetPayload<{ include: typeof taskInclude }>;
 export function toTask(t: TaskRow) {
   return {
     id: t.id,
+    workspaceId: t.workspaceId,
     projectId: t.projectId,
     sectionId: t.sectionId,
     parentId: t.parentId,
@@ -63,14 +65,16 @@ export async function loadTaskDetail(db: PrismaClient, id: string) {
 }
 
 /**
- * Tasks the caller can see, for list queries. A project task is visible with its project. A personal
- * task (no project) is visible to its creator, assignee and followers.
+ * Tasks the caller can see in their workspace, for list queries. A project task is visible with its
+ * project. A personal task (no project) is visible to its creator, assignee and followers.
  */
-export function visibleTasksWhere(user: User): Prisma.TaskWhereInput {
-  if (user.role === 'ADMIN') return {};
+export function visibleTasksWhere(m: Member): Prisma.TaskWhereInput {
+  if (m.role === 'ADMIN') return { workspaceId: m.workspaceId };
+  const user = m.user;
   return {
+    workspaceId: m.workspaceId,
     OR: [
-      { projectId: { not: null }, project: { is: visibleProjectsWhere(user) } },
+      { projectId: { not: null }, project: { is: visibleProjectsWhere(m) } },
       {
         projectId: null,
         OR: [{ creatorId: user.id }, { assigneeId: user.id }, { followers: { some: { userId: user.id } } }],
@@ -79,9 +83,9 @@ export function visibleTasksWhere(user: User): Prisma.TaskWhereInput {
   };
 }
 
-export type TaskAccess = { canEdit: boolean };
+export type TaskAccess = { canEdit: boolean; member: Member };
 
-type TaskRef = { id: string; projectId: string | null; parentId: string | null };
+type TaskRef = { id: string; workspaceId: string; projectId: string | null; parentId: string | null };
 
 /**
  * Resolves the caller's access to one task. Invisible tasks are 404. Subtasks of personal tasks
@@ -92,14 +96,15 @@ export async function taskAccess(db: PrismaClient, user: User, task: TaskRef): P
     const access = await projectAccess(db, user, task.projectId).catch(() => {
       throw notFound('Task');
     });
-    return { canEdit: access.canEdit };
+    return { canEdit: access.canEdit, member: access.member };
   }
-  if (user.role === 'ADMIN') return { canEdit: true };
+  const member = await requireMember(db, user, task.workspaceId, 'Task');
+  if (member.role === 'ADMIN') return { canEdit: true, member };
   let root: TaskRef = task;
   for (let depth = 0; root.parentId && depth < 20; depth++) {
     const parent = await db.task.findUnique({
       where: { id: root.parentId },
-      select: { id: true, projectId: true, parentId: true },
+      select: { id: true, workspaceId: true, projectId: true, parentId: true },
     });
     if (!parent) break;
     root = parent;
@@ -111,7 +116,7 @@ export async function taskAccess(db: PrismaClient, user: User, task: TaskRef): P
     },
   });
   if (!visible) throw notFound('Task');
-  return { canEdit: true };
+  return { canEdit: true, member };
 }
 
 /** Loads a task's ref and the caller's access in one call (404 if missing or invisible). */

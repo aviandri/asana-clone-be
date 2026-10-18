@@ -1,5 +1,6 @@
 // Usage: npm run create-admin -- --email you@company.com --name "Your Name" --password '…'
-// Creates an ADMIN, or promotes an existing user (then --name/--password are optional).
+// Creates a user, or reactivates an existing one (then --name/--password are optional), and makes
+// them ADMIN of the default workspace (DEFAULT_WORKSPACE_NAME, default "Mekari"), creating it if needed.
 import 'dotenv/config';
 import { parseArgs } from 'node:util';
 import { PrismaClient } from '@prisma/client';
@@ -21,12 +22,13 @@ if (!values.email) {
 
 const db = new PrismaClient();
 try {
-  const { user, created } = await upsertAdmin(db, {
+  const { user, created, workspace } = await upsertAdmin(db, {
     email: values.email,
     name: values.name,
     password: values.password,
+    workspaceName: process.env.DEFAULT_WORKSPACE_NAME || undefined,
   });
-  console.log(`${created ? 'Created' : 'Promoted'} admin ${user.email} (${user.id})`);
+  console.log(`${created ? 'Created' : 'Promoted'} admin ${user.email} (${user.id}) of workspace "${workspace.name}"`);
 } catch (err) {
   console.error(err instanceof ZodError ? err.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n') : String(err));
   process.exitCode = 1;

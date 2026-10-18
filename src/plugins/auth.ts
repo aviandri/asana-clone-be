@@ -4,6 +4,7 @@ import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { User } from '@prisma/client';
 import { forbidden, unauthorized } from '../errors.js';
+import type { Member } from '../lib/workspaces.js';
 
 export const SESSION_COOKIE = 'sid';
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -65,6 +66,7 @@ async function authPlugin(app: FastifyInstance, opts: { secret: string; secureCo
 
 export default fp(authPlugin, { name: 'auth', dependencies: ['db'] });
 
-export function requireAdmin(req: FastifyRequest) {
-  if (req.user.role !== 'ADMIN') throw forbidden('Admin only');
+/** Workspace settings and `/admin/*`: ADMIN of that workspace. */
+export function requireAdmin(member: Member) {
+  if (member.role !== 'ADMIN') throw forbidden('Admin only');
 }

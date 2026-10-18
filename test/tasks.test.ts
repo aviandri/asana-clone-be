@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { User } from '@prisma/client';
-import { prisma, setupApp, signedIn } from './helpers.js';
+import { prisma, setupApp, signedIn, defaultWorkspaceId } from './helpers.js';
 
 const ctx = setupApp();
 
@@ -16,7 +16,7 @@ beforeEach(async () => {
   bob = await signedIn(ctx.app, { name: 'Bob' });
   outsider = await signedIn(ctx.app, { name: 'Outsider' });
   const team = await prisma.team.create({
-    data: { name: 'Eng', members: { create: [{ userId: alice.user.id }, { userId: bob.user.id }] } },
+    data: { workspaceId: await defaultWorkspaceId(), name: 'Eng', members: { create: [{ userId: alice.user.id }, { userId: bob.user.id }] } },
   });
   teamId = team.id;
   project = await createProject();
@@ -59,6 +59,7 @@ describe('POST /tasks', () => {
     });
     expect(t).toEqual({
       id: expect.any(String),
+      workspaceId: expect.any(String),
       projectId: project.id,
       sectionId: project.sections[0]!.id,
       parentId: null,

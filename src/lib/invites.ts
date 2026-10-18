@@ -9,6 +9,7 @@ export const newInviteToken = () => randomBytes(24).toString('base64url');
 export function toInvite(invite: Invite & { invitedBy?: UserSummaryRow }, appUrl: string) {
   return {
     id: invite.id,
+    workspaceId: invite.workspaceId,
     email: invite.email,
     role: invite.role,
     token: invite.token,

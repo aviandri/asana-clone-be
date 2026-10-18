@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { User } from '@prisma/client';
-import { prisma, setupApp, signedIn } from './helpers.js';
+import { prisma, setupApp, signedIn, defaultWorkspaceId } from './helpers.js';
 
 const ctx = setupApp();
 
@@ -17,7 +17,7 @@ beforeEach(async () => {
   outsider = await signedIn(ctx.app, { name: 'Outsider' });
   admin = await signedIn(ctx.app, { name: 'Admin', role: 'ADMIN' });
   const team = await prisma.team.create({
-    data: { name: 'Eng', members: { create: [{ userId: owner.user.id }, { userId: teammate.user.id }] } },
+    data: { workspaceId: await defaultWorkspaceId(), name: 'Eng', members: { create: [{ userId: owner.user.id }, { userId: teammate.user.id }] } },
   });
   teamId = team.id;
 });
@@ -123,7 +123,7 @@ describe('settings', () => {
 
   it('deletes a project and cascades its sections and tasks', async () => {
     const p = await createProject();
-    await prisma.task.create({ data: { projectId: p.id, sectionId: p.sections[0].id, title: 'T', creatorId: owner.user.id } });
+    await prisma.task.create({ data: { workspaceId: await defaultWorkspaceId(), projectId: p.id, sectionId: p.sections[0].id, title: 'T', creatorId: owner.user.id } });
     const denied = await ctx.app.inject({ method: 'DELETE', url: `/api/v1/projects/${p.id}`, headers: { cookie: teammate.cookie } });
     expect(denied.statusCode).toBe(403);
     const res = await ctx.app.inject({ method: 'DELETE', url: `/api/v1/projects/${p.id}`, headers: { cookie: owner.cookie } });
@@ -216,7 +216,7 @@ describe('sections', () => {
     const p = await createProject();
     const section = p.sections[0];
     const task = await prisma.task.create({
-      data: { projectId: p.id, sectionId: section.id, title: 'T', creatorId: owner.user.id },
+      data: { workspaceId: await defaultWorkspaceId(), projectId: p.id, sectionId: section.id, title: 'T', creatorId: owner.user.id },
     });
     const patched = await ctx.app.inject({
       method: 'PATCH',

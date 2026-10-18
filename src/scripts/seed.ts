@@ -3,17 +3,28 @@
 //                                 --force-production)
 //        npm run seed -- --goals-only (non-destructive: adds the demo goal cascade to an already
 //                                 seeded database that has no goals yet)
+//        npm run seed -- --workspaces-demo (non-destructive: adds the "Acme Pilot" workspace if
+//                                 it doesn't exist yet)
 import { parseArgs } from 'node:util';
 import { PrismaClient } from '@prisma/client';
 import { buildApp } from '../app.js';
 import { loadConfig } from '../config.js';
-import { SEED_PASSWORD, databaseIsEmpty, resetDatabase, resetRefusal, seed, seedGoalsOnly } from '../lib/seed.js';
+import {
+  SEED_PASSWORD,
+  databaseIsEmpty,
+  resetDatabase,
+  resetRefusal,
+  seed,
+  seedGoalsOnly,
+  seedWorkspacesDemo,
+} from '../lib/seed.js';
 
 const { values } = parseArgs({
   options: {
     reset: { type: 'boolean', default: false },
     'force-production': { type: 'boolean', default: false },
     'goals-only': { type: 'boolean', default: false },
+    'workspaces-demo': { type: 'boolean', default: false },
   },
 });
 
@@ -27,11 +38,19 @@ if (refusal) {
 const prisma = new PrismaClient();
 const app = await buildApp({ config: { ...config, AUTH_RATE_LIMIT_MAX: 1000 }, prisma, logger: false });
 
+const additive = values['goals-only'] || values['workspaces-demo'];
+
 try {
-  if (values['goals-only']) {
-    if (values.reset) throw new Error('--goals-only never resets; drop --reset');
-    const result = await seedGoalsOnly(app);
-    console.log('goals' in result ? `Seeded ${result.goals} goals.` : `Skipped goal seeding: ${result.skipped}.`);
+  if (additive) {
+    if (values.reset) throw new Error('--goals-only / --workspaces-demo never reset; drop --reset');
+    if (values['goals-only']) {
+      const result = await seedGoalsOnly(app);
+      console.log('goals' in result ? `Seeded ${result.goals} goals.` : `Skipped goal seeding: ${result.skipped}.`);
+    }
+    if (values['workspaces-demo']) {
+      const result = await seedWorkspacesDemo(app);
+      console.log('tasks' in result ? `Seeded the demo workspace with ${result.tasks} tasks.` : `Skipped the demo workspace: ${result.skipped}.`);
+    }
   } else if (values.reset) {
     await resetDatabase(prisma);
     console.log('Database reset.');
@@ -39,10 +58,10 @@ try {
     console.error('Database already has users; not seeding. Use `npm run seed -- --reset` to wipe it first.');
     process.exitCode = 1;
   }
-  if (!values['goals-only'] && process.exitCode !== 1) {
+  if (!additive && process.exitCode !== 1) {
     const counts = await seed(app);
     console.log(
-      `Seeded ${counts.users} users, ${counts.teams} teams, ${counts.projects} projects, ${counts.tasks} tasks, ${counts.goals} goals.`,
+      `Seeded ${counts.workspaces} workspaces, ${counts.users} users, ${counts.teams} teams, ${counts.projects} projects, ${counts.tasks} tasks, ${counts.goals} goals.`,
     );
     console.log(`Log in as admin@example.com / alice@example.com / bob@example.com with password "${SEED_PASSWORD}".`);
   }

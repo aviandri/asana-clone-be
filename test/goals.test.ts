@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { User } from '@prisma/client';
 import { currentPeriods } from '../src/lib/time.js';
-import { prisma, setupApp, signedIn } from './helpers.js';
+import { prisma, setupApp, signedIn, defaultWorkspaceId } from './helpers.js';
 
 const ctx = setupApp();
 
@@ -18,7 +18,7 @@ beforeEach(async () => {
   bob = await signedIn(ctx.app, { name: 'Bob' });
   carol = await signedIn(ctx.app, { name: 'Carol' });
   const eng = await prisma.team.create({
-    data: { name: 'Engineering', members: { create: [{ userId: alice.user.id }, { userId: bob.user.id }] } },
+    data: { workspaceId: await defaultWorkspaceId(), name: 'Engineering', members: { create: [{ userId: alice.user.id }, { userId: bob.user.id }] } },
   });
   engId = eng.id;
 });
@@ -44,6 +44,7 @@ describe('create and levels', () => {
     const g = await createGoal(carol, { title: 'Learn Go', description: 'Basics' });
     expect(g).toEqual({
       id: expect.any(String),
+      workspaceId: expect.any(String),
       title: 'Learn Go',
       description: 'Basics',
       owner: expect.objectContaining({ id: carol.user.id, name: 'Carol' }),
@@ -204,14 +205,14 @@ describe('progress', () => {
   });
 
   it('PROJECTS: all tasks incl. subtasks of linked projects; hidden projects still count', async () => {
-    const pub = await prisma.project.create({ data: { teamId: engId, ownerId: alice.user.id, name: 'Public', color: '#000000', privacy: 'PUBLIC' } });
+    const pub = await prisma.project.create({ data: { workspaceId: await defaultWorkspaceId(), teamId: engId, ownerId: alice.user.id, name: 'Public', color: '#000000', privacy: 'PUBLIC' } });
     const secret = await prisma.project.create({
-      data: { teamId: engId, ownerId: alice.user.id, name: 'Secret', color: '#000000', privacy: 'PRIVATE', members: { create: { userId: alice.user.id, role: 'OWNER' } } },
+      data: { workspaceId: await defaultWorkspaceId(), teamId: engId, ownerId: alice.user.id, name: 'Secret', color: '#000000', privacy: 'PRIVATE', members: { create: { userId: alice.user.id, role: 'OWNER' } } },
     });
-    const parent = await prisma.task.create({ data: { projectId: pub.id, title: 'P', creatorId: alice.user.id, completed: true } });
-    await prisma.task.create({ data: { projectId: pub.id, parentId: parent.id, title: 'S', creatorId: alice.user.id } });
-    await prisma.task.create({ data: { projectId: secret.id, title: 'X', creatorId: alice.user.id, completed: true } });
-    await prisma.task.create({ data: { projectId: secret.id, title: 'Y', creatorId: alice.user.id } });
+    const parent = await prisma.task.create({ data: { workspaceId: await defaultWorkspaceId(), projectId: pub.id, title: 'P', creatorId: alice.user.id, completed: true } });
+    await prisma.task.create({ data: { workspaceId: await defaultWorkspaceId(), projectId: pub.id, parentId: parent.id, title: 'S', creatorId: alice.user.id } });
+    await prisma.task.create({ data: { workspaceId: await defaultWorkspaceId(), projectId: secret.id, title: 'X', creatorId: alice.user.id, completed: true } });
+    await prisma.task.create({ data: { workspaceId: await defaultWorkspaceId(), projectId: secret.id, title: 'Y', creatorId: alice.user.id } });
 
     const g = await createGoal(alice, { progressSource: 'PROJECTS' });
     await req(alice, 'POST', `/goals/${g.id}/projects`, { projectId: pub.id });
