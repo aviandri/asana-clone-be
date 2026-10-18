@@ -4,7 +4,7 @@ import { notFound, validation } from '../errors.js';
 import { hashPassword, verifyPassword } from '../lib/password.js';
 import { toUser, toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { hexColor, idParams, parse, password } from '../lib/validate.js';
-import { activeMemberWhere, currentMember, loadMe } from '../lib/workspaces.js';
+import { currentMember, loadMe, pickableUsersWhere } from '../lib/workspaces.js';
 
 const ListQuery = z.object({ q: z.string().trim().max(100).optional() });
 
@@ -20,10 +20,10 @@ const UpdateMeBody = z
 export default async function userRoutes(app: FastifyInstance) {
   app.get('/users', async (req) => {
     const { q } = parse(ListQuery, req.query);
-    const { workspaceId } = await currentMember(req);
+    const member = await currentMember(req);
     const users = await app.db.user.findMany({
       where: {
-        ...activeMemberWhere(workspaceId),
+        ...pickableUsersWhere(member),
         ...(q
           ? {
               OR: [
@@ -63,13 +63,18 @@ export default async function userRoutes(app: FastifyInstance) {
 
   app.get('/users/:id', async (req) => {
     const { id } = parse(idParams, req.params);
-    const { workspaceId } = await currentMember(req);
+    const member = await currentMember(req);
+    const { workspaceId } = member;
     // Members of the current workspace only (incl. deactivated ones, who still appear on old tasks).
     const membership = await app.db.workspaceMember.findUnique({
       where: { workspaceId_userId: { workspaceId, userId: id } },
       include: { user: true },
     });
     if (!membership) throw notFound('User');
+    // Guests only see people who share a project with them, even by id (SPEC §12).
+    if (member.role === 'GUEST' && !(await app.db.user.count({ where: { AND: [{ id }, pickableUsersWhere(member)] } }))) {
+      throw notFound('User');
+    }
     return toUser(membership.user, { role: membership.role, isActive: membership.isActive && membership.user.isActive });
   });
 }

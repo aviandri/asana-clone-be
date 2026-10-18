@@ -124,11 +124,18 @@ describe('invites', () => {
   }
 
   it('looks up a pending invite without auth', async () => {
-    const { token, inviteUrl } = await invite('New@Example.com', 'ADMIN');
+    const { id, token, inviteUrl } = await invite('New@Example.com', 'ADMIN');
     expect(inviteUrl).toBe(`http://localhost:5173/invite/${token}`);
     const res = await ctx.app.inject({ method: 'GET', url: `/api/v1/auth/invites/${token}` });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ email: 'new@example.com', role: 'ADMIN' });
+    const ws = await prisma.workspace.findFirstOrThrow();
+    expect(res.json()).toEqual({
+      id,
+      email: 'new@example.com',
+      role: 'ADMIN',
+      workspace: { id: ws.id, name: ws.name, color: ws.color },
+      existingUser: false,
+    });
   });
 
   it('returns 404 for an unknown token', async () => {

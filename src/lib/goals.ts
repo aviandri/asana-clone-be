@@ -93,7 +93,9 @@ export function assertCanEditGoal(v: GoalViewer, goal: Goal) {
 export async function findGoal(db: PrismaClient, user: User, id: string) {
   const goal = await db.goal.findUnique({ where: { id } });
   if (!goal) throw notFound('Goal');
-  const viewer = await loadViewer(db, await requireMember(db, user, goal.workspaceId, 'Goal'));
+  const member = await requireMember(db, user, goal.workspaceId, 'Goal');
+  if (member.role === 'GUEST') throw notFound('Goal'); // guests can't see goals (SPEC §12)
+  const viewer = await loadViewer(db, member);
   return { goal, viewer };
 }
 

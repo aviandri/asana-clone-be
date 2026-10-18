@@ -4,7 +4,7 @@ import { conflict, forbidden, notFound, validation } from '../errors.js';
 import { toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { idParams, parse, queryBool, uuid } from '../lib/validate.js';
 import { requireAdmin } from '../plugins/auth.js';
-import { currentMember, findMember, requireMember } from '../lib/workspaces.js';
+import { currentMember, findMember, requireMember, requireNotGuest } from '../lib/workspaces.js';
 
 const ListQuery = z.object({ mine: queryBool.optional() });
 const CreateBody = z.object({
@@ -43,6 +43,8 @@ export default async function teamRoutes(app: FastifyInstance) {
     });
     if (!team) throw notFound('Team');
     const member = await requireMember(app.db, req.user, team.workspaceId, 'Team');
+    // Guests are never in teams and don't browse them (SPEC §12).
+    if (member.role === 'GUEST') throw notFound('Team');
     return { team, member };
   }
 
@@ -57,7 +59,8 @@ export default async function teamRoutes(app: FastifyInstance) {
 
   app.get('/teams', async (req) => {
     const { mine } = parse(ListQuery, req.query);
-    const { workspaceId } = await currentMember(req);
+    const { workspaceId, role } = await currentMember(req);
+    if (role === 'GUEST') return { data: [] };
     const teams = await app.db.team.findMany({
       where: { workspaceId, ...(mine ? { members: { some: { userId: req.user.id } } } : {}) },
       include: { _count: { select: { members: true } } },
@@ -77,7 +80,9 @@ export default async function teamRoutes(app: FastifyInstance) {
 
   app.post('/teams', async (req, reply) => {
     const body = parse(CreateBody, req.body);
-    const { workspaceId } = await currentMember(req);
+    const member = await currentMember(req);
+    requireNotGuest(member, 'Guests can’t create teams');
+    const { workspaceId } = member;
     const team = await app.db.team.create({
       data: {
         workspaceId,
@@ -121,10 +126,14 @@ export default async function teamRoutes(app: FastifyInstance) {
     const { team } = await assertTeamMemberOrAdmin(req, id);
     const user = await app.db.user.findUnique({ where: { id: userId } });
     if (!user || !user.isActive) throw notFound('User');
-    if (!(await findMember(app.db, user, team.workspaceId))) {
+    const target = await findMember(app.db, user, team.workspaceId);
+    if (!target) {
       throw validation('User is not an active member of this workspace', [
         { path: ['userId'], message: 'Not an active workspace member' },
       ]);
+    }
+    if (target.role === 'GUEST') {
+      throw validation('Guests can’t join teams', [{ path: ['userId'], message: 'Guests can’t join teams' }]);
     }
     await app.db.teamMember.upsert({
       where: { teamId_userId: { teamId: id, userId } },

@@ -47,7 +47,12 @@ export default async function authRoutes(app: FastifyInstance) {
   app.get('/invites/:token', { config: { public: true } }, async (req) => {
     const { token } = parse(TokenParams, req.params);
     const invite = await findUsableInvite(token);
-    return { email: invite.email, role: invite.role };
+    const [workspace, existingUser] = await Promise.all([
+      app.db.workspace.findUniqueOrThrow({ where: { id: invite.workspaceId }, select: { id: true, name: true, color: true } }),
+      app.db.user.count({ where: { email: invite.email } }),
+    ]);
+    // Existing accounts log in and accept via POST /me/invites/:id/accept (SPEC §12).
+    return { id: invite.id, email: invite.email, role: invite.role, workspace, existingUser: existingUser > 0 };
   });
 
   app.post('/accept-invite', { config: limited }, async (req, reply) => {

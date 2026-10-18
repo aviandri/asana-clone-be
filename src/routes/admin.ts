@@ -4,10 +4,17 @@ import { conflict, notFound } from '../errors.js';
 import { INVITE_TTL_MS, newInviteToken, toInvite } from '../lib/invites.js';
 import { toUser, userSummarySelect } from '../lib/serialize.js';
 import { email, idParams, parse } from '../lib/validate.js';
-import { assertNotLastAdmin, currentMember, removeFromWorkspaceContent, seniorAdminId } from '../lib/workspaces.js';
+import {
+  assertNotLastAdmin,
+  assertRoleAllowed,
+  currentMember,
+  demoteToGuests,
+  removeFromWorkspaceContent,
+  seniorAdminId,
+} from '../lib/workspaces.js';
 import { requireAdmin } from '../plugins/auth.js';
 
-const role = z.enum(['ADMIN', 'MEMBER']);
+const role = z.enum(['ADMIN', 'MEMBER', 'GUEST']);
 const UpdateUserBody = z.object({ role: role.optional(), isActive: z.boolean().optional() }).strict();
 const CreateInviteBody = z.object({ email, role: role.default('MEMBER') });
 
@@ -37,17 +44,21 @@ export default async function adminRoutes(app: FastifyInstance) {
     const key = { workspaceId_userId: { workspaceId, userId: id } };
 
     const membership = await db.$transaction(async (tx) => {
-      const existing = await tx.workspaceMember.findUnique({ where: key });
+      const existing = await tx.workspaceMember.findUnique({ where: key, include: { user: true, workspace: true } });
       if (!existing) throw notFound('User');
+      if (body.role) assertRoleAllowed(existing.workspace, existing.user.email, body.role);
       const demoted = body.role !== undefined && body.role !== 'ADMIN';
       const deactivated = body.isActive === false && existing.isActive;
       if (demoted || deactivated) await assertNotLastAdmin(tx, workspaceId, id);
       // Deactivation removes them from the workspace's teams and projects; the acting admin
       // inherits projects that would be left without an owner. Admins deactivating themselves
       // hand them on like leave does: to the longest-standing other admin.
+      const heirId = () => (id === admin.user.id ? seniorAdminId(tx, workspaceId, id) : Promise.resolve(admin.user.id));
       if (deactivated) {
-        const heirId = id === admin.user.id ? await seniorAdminId(tx, workspaceId, id) : admin.user.id;
-        await removeFromWorkspaceContent(tx, workspaceId, id, heirId);
+        await removeFromWorkspaceContent(tx, workspaceId, id, await heirId());
+      } else if (body.role === 'GUEST' && existing.role !== 'GUEST') {
+        // Guests leave teams and lose project OWNER rights (W4/W7); projects keep an owner.
+        await demoteToGuests(tx, workspaceId, [id], await heirId());
       }
       return tx.workspaceMember.update({ where: key, data: body, include: { user: true } });
     });
@@ -57,6 +68,7 @@ export default async function adminRoutes(app: FastifyInstance) {
   app.post('/invites', async (req, reply) => {
     const body = parse(CreateInviteBody, req.body);
     const { workspaceId } = await currentMember(req);
+    assertRoleAllowed(await db.workspace.findUniqueOrThrow({ where: { id: workspaceId } }), body.email, body.role);
     const isMember = await db.workspaceMember.count({
       where: { workspaceId, isActive: true, user: { email: body.email, isActive: true } },
     });
