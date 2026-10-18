@@ -24,7 +24,9 @@ export default async function adminRoutes(app: FastifyInstance) {
       include: { user: true },
       orderBy: [{ user: { name: 'asc' } }, { userId: 'asc' }],
     });
-    return { data: members.map((m) => toUser(m.user, { role: m.role, isActive: m.isActive && m.user.isActive })) };
+    // isActive is the membership's (SPEC §12). A user deactivated globally (pre-v1.2, or via
+    // create-admin / DB) still can't log in after an admin re-activates them here.
+    return { data: members.map((m) => toUser(m.user, { role: m.role, isActive: m.isActive })) };
   });
 
   app.patch('/users/:id', async (req) => {
@@ -45,7 +47,7 @@ export default async function adminRoutes(app: FastifyInstance) {
       if (deactivated) await removeFromWorkspaceContent(tx, workspaceId, id, admin.user.id);
       return tx.workspaceMember.update({ where: key, data: body, include: { user: true } });
     });
-    return toUser(membership.user, { role: membership.role, isActive: membership.isActive && membership.user.isActive });
+    return toUser(membership.user, { role: membership.role, isActive: membership.isActive });
   });
 
   app.post('/invites', async (req, reply) => {

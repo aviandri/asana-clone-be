@@ -99,7 +99,7 @@ describe('admin', () => {
 
   it('lists all users including inactive', async () => {
     const { cookie } = await signedIn(ctx.app, { role: 'ADMIN', name: 'Admin' });
-    await createUser({ name: 'Gone', isActive: false });
+    await createUser({ name: 'Gone', memberActive: false });
     const res = await ctx.app.inject({ method: 'GET', url: '/api/v1/admin/users', headers: { cookie } });
     expect(res.json().data.map((u: { name: string; isActive: boolean }) => [u.name, u.isActive])).toEqual([
       ['Admin', true],

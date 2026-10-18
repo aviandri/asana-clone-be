@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { addMember, createUser, defaultWorkspaceId, login, prisma, setupApp, signedIn } from './helpers.js';
+import { addMember, createUser, defaultWorkspaceId, login, PASSWORD, prisma, setupApp, signedIn } from './helpers.js';
 
 const ctx = setupApp();
 
@@ -381,6 +381,18 @@ describe('/admin/* in the current workspace', () => {
     await ok(await req(alice, 'PATCH', `/admin/users/${carol.user.id}`, { isActive: true }));
     expect((await req(carol, 'GET', '/projects', undefined, wsA)).statusCode).toBe(200);
     expect(await prisma.teamMember.count({ where: { userId: carol.user.id } })).toBe(0);
+  });
+
+  it('re-activating a globally deactivated user edits the membership but does not let them log in', async () => {
+    // e.g. deactivated before v1.2: the migration keeps User.isActive=false next to an inactive membership.
+    const gone = await createUser({ name: 'Gone', email: 'gone@example.com', workspaceId: wsA, isActive: false, memberActive: false });
+    expect(await ok(await req(alice, 'PATCH', `/admin/users/${gone.id}`, { isActive: true }))).toMatchObject({ isActive: true });
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { email: 'gone@example.com', password: PASSWORD },
+    });
+    expect(res.statusCode).toBe(401);
   });
 
   it('invites carry the workspace; active members get 409, people from other workspaces can be invited', async () => {

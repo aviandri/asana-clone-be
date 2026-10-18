@@ -49,13 +49,14 @@ SELECT d."id", COALESCE(NULLIF(current_setting('mekari.default_workspace_name', 
 FROM "_default_ws" d
 WHERE EXISTS (SELECT 1 FROM "User");
 
--- Each user's v1 role moves to their membership. v1 deactivation was an admin action, so it becomes
--- an inactive membership, and the global flag is cleared so a workspace admin can re-activate them.
+-- Each user's v1 role moves to their membership; inactive users get an inactive membership. The
+-- global User.isActive flag is kept as is: it still blocks login (SPEC §12), so nobody the company
+-- deactivated can log back in. Re-enabling such a user needs `npm run create-admin` or a DB update.
 INSERT INTO "WorkspaceMember" ("workspaceId", "userId", "role", "isActive", "joinedAt")
 SELECT w."id", u."id", u."role"::text::"WorkspaceRole", u."isActive", u."createdAt"
 FROM "User" u CROSS JOIN "Workspace" w;
 
-UPDATE "User" SET "lastWorkspaceId" = (SELECT "id" FROM "Workspace"), "isActive" = true;
+UPDATE "User" SET "lastWorkspaceId" = (SELECT "id" FROM "Workspace");
 UPDATE "Team" SET "workspaceId" = (SELECT "id" FROM "Workspace");
 UPDATE "Project" SET "workspaceId" = (SELECT "id" FROM "Workspace");
 UPDATE "Task" SET "workspaceId" = (SELECT "id" FROM "Workspace");
