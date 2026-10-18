@@ -82,9 +82,14 @@ Take a `pg_dump` before upgrading anything that ships a migration.
 
 **Upgrading to v1.2 (workspaces):** the migration moves everyone into one workspace named
 "Mekari". Users who were deactivated before v1.2 stay deactivated globally, so re-activating
-them under Workspace settings › Members isn't enough on its own. To let one log in again, run
-`docker compose exec be npm run create-admin -- --email them@company.com` (this also makes them
-an admin) or set `"isActive" = true` on their `User` row.
+them under Workspace settings › Members isn't enough on its own. To let one log in again,
+re-enable their account in the database:
+```sh
+docker compose exec postgres psql -U asana -d asana \
+  -c "UPDATE \"User\" SET \"isActive\" = true WHERE email = 'them@company.com';"
+```
+Use `npm run create-admin` only for people who should also become workspace admins: it re-enables
+the account *and* makes them ADMIN of the default workspace.
 
 ## Logs
 `docker compose logs -f be` / `fe` / `postgres`.
