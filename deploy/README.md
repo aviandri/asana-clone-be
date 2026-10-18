@@ -108,5 +108,15 @@ v1.1 images. A fresh, empty database gets no workspace from the migration; `crea
 the seed) creates it. CI's `upgrade` job runs this migration against a database seeded with the
 last pre-v1.2 release on every PR.
 
+Users who were deactivated before v1.2 stay deactivated globally, so re-activating
+them under Workspace settings › Members isn't enough on its own. To let one log in again,
+re-enable their account in the database:
+```sh
+docker compose exec postgres psql -U asana -d asana \
+  -c "UPDATE \"User\" SET \"isActive\" = true WHERE email = 'them@company.com';"
+```
+Use `npm run create-admin` only for people who should also become workspace admins: it re-enables
+the account *and* makes them ADMIN of the default workspace.
+
 ## Logs
 `docker compose logs -f be` / `fe` / `postgres`.

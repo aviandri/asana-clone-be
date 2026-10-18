@@ -10,6 +10,7 @@ import { fromDateOnly, toDateOnly, toUserSummary, userSummarySelect } from '../l
 import { taskInclude, toTask, visibleTasksWhere } from '../lib/tasks.js';
 import { addDays, daysBetweenInclusive, mondayOf, zonedDate, zonedDayStart } from '../lib/time.js';
 import { dateOnly, idParams, parse, uuid } from '../lib/validate.js';
+import { activeMemberWhere, currentMember } from '../lib/workspaces.js';
 
 const ReportQuery = z.object({ weeks: z.coerce.number().int().min(1).max(52).default(12) });
 const OverviewQuery = z.object({ teamId: uuid.optional() });
@@ -135,9 +136,10 @@ export default async function reportRoutes(app: FastifyInstance) {
 
   app.get('/reports/overview', async (req) => {
     const { teamId } = parse(OverviewQuery, req.query);
+    const member = await currentMember(req);
     const today = zonedDate(tz());
     const projects = await db.project.findMany({
-      where: { AND: [visibleProjectsWhere(req.user), { archived: false }, teamId ? { teamId } : {}] },
+      where: { AND: [visibleProjectsWhere(member), { archived: false }, teamId ? { teamId } : {}] },
       include: projectInclude(req.user.id),
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
     });
@@ -192,6 +194,8 @@ export default async function reportRoutes(app: FastifyInstance) {
 
   app.get('/reports/workload', async (req) => {
     const query = parse(WorkloadQuery, req.query);
+    const member = await currentMember(req);
+    const { workspaceId } = member;
     const today = zonedDate(tz());
     const from = query.from ?? mondayOf(today);
     const to = query.to ?? addDays(from, 6);
@@ -200,12 +204,16 @@ export default async function reportRoutes(app: FastifyInstance) {
     if (span > MAX_WORKLOAD_DAYS) {
       throw validation(`The range can be at most ${MAX_WORKLOAD_DAYS} days`, [{ path: ['to'], message: 'Range too long' }]);
     }
-    if (query.teamId && !(await db.team.findUnique({ where: { id: query.teamId }, select: { id: true } }))) {
+    if (query.teamId && !(await db.team.count({ where: { id: query.teamId, workspaceId } }))) {
       throw notFound('Team');
     }
 
+    // Active members of the current workspace (of the team, if given).
     const users = await db.user.findMany({
-      where: { isActive: true, ...(query.teamId ? { teamMemberships: { some: { teamId: query.teamId } } } : {}) },
+      where: {
+        ...activeMemberWhere(workspaceId),
+        ...(query.teamId ? { teamMemberships: { some: { teamId: query.teamId } } } : {}),
+      },
       select: userSummarySelect,
     });
     const userIds = users.map((u) => u.id);
@@ -214,7 +222,7 @@ export default async function reportRoutes(app: FastifyInstance) {
     const scope: Prisma.TaskWhereInput = {
       AND: [
         { assigneeId: { in: userIds } },
-        visibleTasksWhere(req.user),
+        visibleTasksWhere(member),
         query.teamId ? { project: { is: { teamId: query.teamId } } } : {},
       ],
     };

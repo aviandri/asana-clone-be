@@ -1,4 +1,4 @@
-import type { User } from '@prisma/client';
+import type { User, WorkspaceRole } from '@prisma/client';
 
 export const userSummarySelect = { id: true, name: true, email: true, avatarColor: true } as const;
 
@@ -8,11 +8,12 @@ export function toUserSummary(u: UserSummaryRow) {
   return { id: u.id, name: u.name, email: u.email, avatarColor: u.avatarColor };
 }
 
-export function toUser(u: User) {
+/** SPEC §12: `role` is the role in the current workspace; `isActive` is per context (membership for /admin). */
+export function toUser(u: User, ctx: { role: WorkspaceRole; isActive: boolean }) {
   return {
     ...toUserSummary(u),
-    role: u.role,
-    isActive: u.isActive,
+    role: ctx.role,
+    isActive: ctx.isActive,
     createdAt: u.createdAt.toISOString(),
   };
 }

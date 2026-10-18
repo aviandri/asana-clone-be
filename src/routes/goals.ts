@@ -21,6 +21,7 @@ import { POSITION_STEP } from '../lib/projects.js';
 import { userSummarySelect } from '../lib/serialize.js';
 import { currentPeriods, sortPeriods, TIME_PERIOD } from '../lib/time.js';
 import { idParams, parse, queryBool, uuid } from '../lib/validate.js';
+import { activeMemberWhere, currentMember } from '../lib/workspaces.js';
 
 const goalStatus = z.enum(['NO_STATUS', 'ON_TRACK', 'AT_RISK', 'OFF_TRACK', 'ACHIEVED', 'PARTIAL', 'MISSED', 'DROPPED']);
 const progressSource = z.enum(['KEY_RESULTS', 'SUB_GOALS', 'PROJECTS', 'MANUAL']);
@@ -105,13 +106,16 @@ function normaliseKr(kr: KrValues): KrValues {
 export default async function goalRoutes(app: FastifyInstance) {
   const db = app.db;
 
-  async function assertActiveUser(id: string, path: string) {
-    const user = await db.user.findUnique({ where: { id }, select: { isActive: true } });
-    if (!user?.isActive) throw validation('User not found or inactive', [{ path: [path], message: 'Unknown or inactive user' }]);
+  /** Goal and KR owners must be active members of the goal's workspace (SPEC §12). */
+  async function assertActiveMember(workspaceId: string, id: string, path: string) {
+    const ok = await db.user.count({ where: { id, ...activeMemberWhere(workspaceId) } });
+    if (!ok) {
+      throw validation('User is not an active member of this workspace', [{ path: [path], message: 'Not an active workspace member' }]);
+    }
   }
 
-  async function assertTeamExists(id: string) {
-    if (!(await db.team.findUnique({ where: { id }, select: { id: true } }))) throw notFound('Team');
+  async function assertTeamInWorkspace(id: string, workspaceId: string) {
+    if (!(await db.team.count({ where: { id, workspaceId } }))) throw notFound('Team');
   }
 
   function assertExclusiveLevel(level: { isCompany: boolean; teamId: string | null }) {
@@ -122,8 +126,9 @@ export default async function goalRoutes(app: FastifyInstance) {
     }
   }
 
-  async function assertValidParent(goalId: string | undefined, parentId: string) {
-    const rows = await db.goal.findMany({ select: { id: true, parentId: true } });
+  /** Parents must be in the same workspace: a parent elsewhere is "not found" (400). */
+  async function assertValidParent(workspaceId: string, goalId: string | undefined, parentId: string) {
+    const rows = await db.goal.findMany({ where: { workspaceId }, select: { id: true, parentId: true } });
     const parents = new Map(rows.map((r) => [r.id, r.parentId]));
     const children = new Map<string, string[]>();
     for (const r of rows) if (r.parentId) children.set(r.parentId, [...(children.get(r.parentId) ?? []), r.id]);
@@ -132,7 +137,7 @@ export default async function goalRoutes(app: FastifyInstance) {
   }
 
   async function editableGoal(req: FastifyRequest, id: string) {
-    const [goal, viewer] = await Promise.all([findGoal(db, id), loadViewer(db, req.user)]);
+    const { goal, viewer } = await findGoal(db, req.user, id);
     assertCanEditGoal(viewer, goal);
     return { goal, viewer };
   }
@@ -141,9 +146,11 @@ export default async function goalRoutes(app: FastifyInstance) {
 
   app.get('/goals', async (req) => {
     const query = parse(ListQuery, req.query);
+    const member = await currentMember(req);
     const [rows, snap, viewer] = await Promise.all([
       db.goal.findMany({
         where: {
+          workspaceId: member.workspaceId,
           ...(query.timePeriod ? { timePeriod: query.timePeriod } : {}),
           ...(query.teamId ? { teamId: query.teamId } : {}),
           ...(query.ownerId ? { ownerId: query.ownerId } : {}),
@@ -153,30 +160,34 @@ export default async function goalRoutes(app: FastifyInstance) {
         include: goalInclude,
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       }),
-      loadGoalSnapshot(db),
-      loadViewer(db, req.user),
+      loadGoalSnapshot(db, member.workspaceId),
+      loadViewer(db, member),
     ]);
     return { data: rows.map((g) => toGoal(g, snap, viewer)) };
   });
 
-  app.get('/goals/time-periods', async () => {
-    const used = await db.goal.findMany({ distinct: ['timePeriod'], select: { timePeriod: true } });
+  app.get('/goals/time-periods', async (req) => {
+    const { workspaceId } = await currentMember(req);
+    const used = await db.goal.findMany({ where: { workspaceId }, distinct: ['timePeriod'], select: { timePeriod: true } });
     return { data: sortPeriods([...used.map((u) => u.timePeriod), ...currentPeriods(app.config.APP_TIMEZONE)]) };
   });
 
   app.post('/goals', async (req, reply) => {
     const body = parse(CreateGoalBody, req.body);
-    const viewer = await loadViewer(db, req.user);
+    const member = await currentMember(req);
+    const { workspaceId } = member;
+    const viewer = await loadViewer(db, member);
     const level = { isCompany: body.isCompany ?? false, teamId: body.teamId ?? null };
     assertExclusiveLevel(level);
     assertCanCreateAtLevel(viewer, level);
-    if (level.teamId) await assertTeamExists(level.teamId);
+    if (level.teamId) await assertTeamInWorkspace(level.teamId, workspaceId);
     const ownerId = body.ownerId ?? req.user.id;
-    if (ownerId !== req.user.id) await assertActiveUser(ownerId, 'ownerId');
-    if (body.parentId) await assertValidParent(undefined, body.parentId);
+    if (ownerId !== req.user.id) await assertActiveMember(workspaceId, ownerId, 'ownerId');
+    if (body.parentId) await assertValidParent(workspaceId, undefined, body.parentId);
 
     const goal = await db.goal.create({
       data: {
+        workspaceId,
         title: body.title,
         description: body.description ?? null,
         ownerId,
@@ -192,7 +203,8 @@ export default async function goalRoutes(app: FastifyInstance) {
 
   app.get('/goals/:id', async (req) => {
     const { id } = parse(idParams, req.params);
-    return loadGoalDetail(db, id, await loadViewer(db, req.user));
+    const { viewer } = await findGoal(db, req.user, id);
+    return loadGoalDetail(db, id, viewer);
   });
 
   app.patch('/goals/:id', async (req) => {
@@ -208,10 +220,10 @@ export default async function goalRoutes(app: FastifyInstance) {
     if (level.isCompany !== goal.isCompany || level.teamId !== goal.teamId) {
       // Moving a goal to another level needs the right to create goals there.
       assertCanCreateAtLevel(viewer, level);
-      if (level.teamId && level.teamId !== goal.teamId) await assertTeamExists(level.teamId);
+      if (level.teamId && level.teamId !== goal.teamId) await assertTeamInWorkspace(level.teamId, goal.workspaceId);
     }
-    if (body.ownerId && body.ownerId !== goal.ownerId) await assertActiveUser(body.ownerId, 'ownerId');
-    if (body.parentId && body.parentId !== goal.parentId) await assertValidParent(id, body.parentId);
+    if (body.ownerId && body.ownerId !== goal.ownerId) await assertActiveMember(goal.workspaceId, body.ownerId, 'ownerId');
+    if (body.parentId && body.parentId !== goal.parentId) await assertValidParent(goal.workspaceId, id, body.parentId);
 
     await db.goal.update({ where: { id }, data: { ...body, ...level } });
     return loadGoalDetail(db, id, viewer);
@@ -230,8 +242,8 @@ export default async function goalRoutes(app: FastifyInstance) {
   app.post('/goals/:id/key-results', async (req, reply) => {
     const { id } = parse(idParams, req.params);
     const body = parse(CreateKrBody, req.body);
-    await editableGoal(req, id);
-    if (body.ownerId) await assertActiveUser(body.ownerId, 'ownerId');
+    const { goal } = await editableGoal(req, id);
+    if (body.ownerId) await assertActiveMember(goal.workspaceId, body.ownerId, 'ownerId');
 
     // BOOLEAN KRs always start at 0, so their default current value is 0 too.
     const startValue = body.metricType === 'BOOLEAN' ? 0 : (body.startValue ?? 0);
@@ -256,9 +268,12 @@ export default async function goalRoutes(app: FastifyInstance) {
   app.patch('/key-results/:id', async (req) => {
     const { id } = parse(idParams, req.params);
     const body = parse(UpdateKrBody, req.body);
-    const kr = await db.keyResult.findUnique({ where: { id }, include: { goal: true } });
-    if (!kr) throw notFound('Key result');
-    const viewer = await loadViewer(db, req.user);
+    const ref = await db.keyResult.findUnique({ where: { id }, select: { goalId: true } });
+    if (!ref) throw notFound('Key result');
+    const { goal, viewer } = await findGoal(db, req.user, ref.goalId).catch(() => {
+      throw notFound('Key result');
+    });
+    const kr = await db.keyResult.findUniqueOrThrow({ where: { id }, include: { goal: true } });
     if (!canEditGoal(viewer, kr.goal)) {
       // A KR's owner may update its current value, and nothing else.
       const onlyCurrent = Object.keys(body).every((k) => k === 'currentValue');
@@ -266,7 +281,7 @@ export default async function goalRoutes(app: FastifyInstance) {
         throw forbidden('Only the goal owner, its team or an admin can change this key result');
       }
     }
-    if (body.ownerId) await assertActiveUser(body.ownerId, 'ownerId');
+    if (body.ownerId) await assertActiveMember(goal.workspaceId, body.ownerId, 'ownerId');
 
     const values = normaliseKr({
       metricType: body.metricType ?? kr.metricType,
@@ -298,8 +313,10 @@ export default async function goalRoutes(app: FastifyInstance) {
   app.post('/goals/:id/projects', async (req) => {
     const { id } = parse(idParams, req.params);
     const { projectId } = parse(LinkBody, req.body);
-    const { viewer } = await editableGoal(req, id);
-    await projectAccess(db, req.user, projectId); // 404 unless the caller can see it
+    const { goal, viewer } = await editableGoal(req, id);
+    // 404 unless the caller can see it, and projects in other workspaces can't be linked (SPEC §12).
+    const access = await projectAccess(db, req.user, projectId);
+    if (access.member.workspaceId !== goal.workspaceId) throw notFound('Project');
     await db.goalProject.createMany({ data: [{ goalId: id, projectId }], skipDuplicates: true });
     return loadGoalDetail(db, id, viewer);
   });
@@ -315,7 +332,7 @@ export default async function goalRoutes(app: FastifyInstance) {
 
   app.get('/goals/:id/updates', async (req) => {
     const { id } = parse(idParams, req.params);
-    await findGoal(db, id);
+    await findGoal(db, req.user, id);
     const updates = await db.goalUpdate.findMany({
       where: { goalId: id },
       include: { author: { select: userSummarySelect } },
@@ -327,12 +344,12 @@ export default async function goalRoutes(app: FastifyInstance) {
   app.post('/goals/:id/updates', async (req, reply) => {
     const { id } = parse(idParams, req.params);
     const body = parse(UpdateBody, req.body);
-    const [goal, viewer] = await Promise.all([findGoal(db, id), loadViewer(db, req.user)]);
+    const { goal, viewer } = await findGoal(db, req.user, id);
     if (!canEditGoal(viewer, goal)) {
       const ownsKr = await db.keyResult.count({ where: { goalId: id, ownerId: req.user.id } });
       if (!ownsKr) throw forbidden('Only people who can edit this goal or own one of its key results can post updates');
     }
-    const snap = await loadGoalSnapshot(db);
+    const snap = await loadGoalSnapshot(db, goal.workspaceId);
     const update = await db.$transaction(async (tx) => {
       const created = await tx.goalUpdate.create({
         data: {

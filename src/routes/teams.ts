@@ -1,9 +1,10 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { conflict, forbidden, notFound } from '../errors.js';
+import { conflict, forbidden, notFound, validation } from '../errors.js';
 import { toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { idParams, parse, queryBool, uuid } from '../lib/validate.js';
 import { requireAdmin } from '../plugins/auth.js';
+import { currentMember, findMember, requireMember } from '../lib/workspaces.js';
 
 const ListQuery = z.object({ mine: queryBool.optional() });
 const CreateBody = z.object({
@@ -25,6 +26,7 @@ export default async function teamRoutes(app: FastifyInstance) {
     if (!team) throw notFound('Team');
     return {
       id: team.id,
+      workspaceId: team.workspaceId,
       name: team.name,
       description: team.description,
       memberCount: team.members.length,
@@ -33,28 +35,38 @@ export default async function teamRoutes(app: FastifyInstance) {
     };
   }
 
-  /** Team membership changes and edits: members of the team, or ADMIN. */
-  async function assertTeamMemberOrAdmin(req: FastifyRequest, teamId: string) {
+  /** ID-addressed: the caller must be an active member of the team's workspace (else 404). */
+  async function findTeam(req: FastifyRequest, teamId: string) {
     const team = await app.db.team.findUnique({
       where: { id: teamId },
-      select: { members: { where: { userId: req.user.id }, select: { userId: true } } },
+      select: { workspaceId: true, members: { where: { userId: req.user.id }, select: { userId: true } } },
     });
     if (!team) throw notFound('Team');
-    if (req.user.role !== 'ADMIN' && team.members.length === 0) {
+    const member = await requireMember(app.db, req.user, team.workspaceId, 'Team');
+    return { team, member };
+  }
+
+  /** Team membership changes and edits: members of the team, or ADMIN. */
+  async function assertTeamMemberOrAdmin(req: FastifyRequest, teamId: string) {
+    const found = await findTeam(req, teamId);
+    if (found.member.role !== 'ADMIN' && found.team.members.length === 0) {
       throw forbidden('Only team members can change this team');
     }
+    return found;
   }
 
   app.get('/teams', async (req) => {
     const { mine } = parse(ListQuery, req.query);
+    const { workspaceId } = await currentMember(req);
     const teams = await app.db.team.findMany({
-      where: mine ? { members: { some: { userId: req.user.id } } } : {},
+      where: { workspaceId, ...(mine ? { members: { some: { userId: req.user.id } } } : {}) },
       include: { _count: { select: { members: true } } },
       orderBy: { name: 'asc' },
     });
     return {
       data: teams.map((t) => ({
         id: t.id,
+        workspaceId: t.workspaceId,
         name: t.name,
         description: t.description,
         memberCount: t._count.members,
@@ -65,8 +77,10 @@ export default async function teamRoutes(app: FastifyInstance) {
 
   app.post('/teams', async (req, reply) => {
     const body = parse(CreateBody, req.body);
+    const { workspaceId } = await currentMember(req);
     const team = await app.db.team.create({
       data: {
+        workspaceId,
         name: body.name,
         description: body.description ?? null,
         members: { create: { userId: req.user.id } },
@@ -77,6 +91,7 @@ export default async function teamRoutes(app: FastifyInstance) {
 
   app.get('/teams/:id', async (req) => {
     const { id } = parse(idParams, req.params);
+    await findTeam(req, id);
     return loadTeamDetail(id);
   });
 
@@ -89,8 +104,8 @@ export default async function teamRoutes(app: FastifyInstance) {
   });
 
   app.delete('/teams/:id', async (req, reply) => {
-    requireAdmin(req);
     const { id } = parse(idParams, req.params);
+    requireAdmin((await findTeam(req, id)).member);
     const team = await app.db.team.findUnique({ where: { id }, include: { _count: { select: { projects: true, goals: true } } } });
     if (!team) throw notFound('Team');
     if (team._count.projects > 0 || team._count.goals > 0) {
@@ -103,9 +118,14 @@ export default async function teamRoutes(app: FastifyInstance) {
   app.post('/teams/:id/members', async (req) => {
     const { id } = parse(idParams, req.params);
     const { userId } = parse(MemberBody, req.body);
-    await assertTeamMemberOrAdmin(req, id);
+    const { team } = await assertTeamMemberOrAdmin(req, id);
     const user = await app.db.user.findUnique({ where: { id: userId } });
     if (!user || !user.isActive) throw notFound('User');
+    if (!(await findMember(app.db, user, team.workspaceId))) {
+      throw validation('User is not an active member of this workspace', [
+        { path: ['userId'], message: 'Not an active workspace member' },
+      ]);
+    }
     await app.db.teamMember.upsert({
       where: { teamId_userId: { teamId: id, userId } },
       create: { teamId: id, userId },

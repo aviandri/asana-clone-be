@@ -4,6 +4,7 @@ import { notFound } from '../errors.js';
 import { toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { visibleTasksWhere } from '../lib/tasks.js';
 import { idParams, parse, queryBool } from '../lib/validate.js';
+import { currentMember, requireMember } from '../lib/workspaces.js';
 
 const ListQuery = z.object({
   unread: queryBool.optional(),
@@ -16,9 +17,13 @@ export default async function notificationRoutes(app: FastifyInstance) {
   app.get('/notifications', async (req) => {
     const { unread, limit } = parse(ListQuery, req.query);
     const userId = req.user.id;
-    // Notifications about tasks the user can no longer see are hidden, so titles don't leak once
-    // access is removed.
-    const visible = { OR: [{ taskId: null }, { task: { is: visibleTasksWhere(req.user) } }] };
+    const member = await currentMember(req);
+    // The current workspace's inbox. Notifications about tasks the user can no longer see are
+    // hidden, so titles don't leak once access is removed.
+    const visible = {
+      workspaceId: member.workspaceId,
+      OR: [{ taskId: null }, { task: { is: visibleTasksWhere(member) } }],
+    };
     const [rows, unreadCount] = await Promise.all([
       db.notification.findMany({
         where: { userId, ...visible, ...(unread ? { read: false } : {}) },
@@ -34,6 +39,7 @@ export default async function notificationRoutes(app: FastifyInstance) {
     return {
       data: rows.map((n) => ({
         id: n.id,
+        workspaceId: n.workspaceId,
         type: n.type,
         read: n.read,
         createdAt: n.createdAt.toISOString(),
@@ -46,14 +52,17 @@ export default async function notificationRoutes(app: FastifyInstance) {
 
   // Registered before /:id/read so "read-all" can never be taken for an id.
   app.post('/notifications/read-all', async (req, reply) => {
-    await db.notification.updateMany({ where: { userId: req.user.id, read: false }, data: { read: true } });
+    const { workspaceId } = await currentMember(req);
+    await db.notification.updateMany({ where: { userId: req.user.id, workspaceId, read: false }, data: { read: true } });
     return reply.status(204).send();
   });
 
   app.post('/notifications/:id/read', async (req, reply) => {
     const { id } = parse(idParams, req.params);
-    const { count } = await db.notification.updateMany({ where: { id, userId: req.user.id }, data: { read: true } });
-    if (count === 0) throw notFound('Notification');
+    const notification = await db.notification.findFirst({ where: { id, userId: req.user.id }, select: { workspaceId: true } });
+    if (!notification) throw notFound('Notification');
+    await requireMember(db, req.user, notification.workspaceId, 'Notification');
+    await db.notification.update({ where: { id }, data: { read: true } });
     return reply.status(204).send();
   });
 }

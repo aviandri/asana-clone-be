@@ -16,6 +16,7 @@ import {
   visibleTasksWhere,
 } from '../lib/tasks.js';
 import { dateOnly, idParams, parse, queryBool, uuid } from '../lib/validate.js';
+import { currentMember, findMember } from '../lib/workspaces.js';
 
 const priority = z.enum(['NONE', 'LOW', 'MEDIUM', 'HIGH']);
 
@@ -58,13 +59,24 @@ export default async function taskRoutes(app: FastifyInstance) {
   const db = app.db;
 
   /**
-   * The user someone wants to assign or add as a follower: must exist, be active and be able to see
-   * the project. Otherwise they'd get notifications about a task they can't open. (Asana shares the
-   * project automatically instead; v1 rejects.)
+   * The user someone wants to assign or add as a follower: must exist, be active, be an active member
+   * of the task's workspace (SPEC §12) and be able to see the project. Otherwise they'd get
+   * notifications about a task they can't open. (Asana shares the project automatically instead; v1
+   * rejects.)
    */
-  async function assertCanBeInvolved(userId: string, projectId: string | null, field: 'assigneeId' | 'userId') {
+  async function assertCanBeInvolved(
+    userId: string,
+    workspaceId: string,
+    projectId: string | null,
+    field: 'assigneeId' | 'userId',
+  ) {
     const user = await db.user.findUnique({ where: { id: userId } });
     if (!user || !user.isActive) throw notFound('User');
+    if (!(await findMember(db, user, workspaceId))) {
+      throw validation('User is not an active member of this workspace', [
+        { path: [field], message: 'Not an active workspace member' },
+      ]);
+    }
     if (!projectId) return;
     const visible = await projectAccess(db, user, projectId).then(() => true, () => false);
     if (!visible) {
@@ -72,9 +84,14 @@ export default async function taskRoutes(app: FastifyInstance) {
     }
   }
 
-  /** The caller must be able to edit tasks in the given project (404 if invisible, 403 for commenters). */
-  async function assertCanEditProject(req: FastifyRequest, projectId: string | null) {
-    if (projectId) assertCanEdit(await projectAccess(db, req.user, projectId));
+  /**
+   * The caller must be able to edit tasks in the project (404 if invisible, 403 for commenters).
+   * Returns the project's workspace.
+   */
+  async function assertCanEditProject(req: FastifyRequest, projectId: string) {
+    const access = await projectAccess(db, req.user, projectId);
+    assertCanEdit(access);
+    return access.member.workspaceId;
   }
 
   /** Checks that a section exists and belongs to the project (adopting its project when none is given). */
@@ -124,13 +141,14 @@ export default async function taskRoutes(app: FastifyInstance) {
 
   app.get('/me/tasks', async (req) => {
     const query = parse(MyTasksQuery, req.query);
+    const member = await currentMember(req);
     const tasks = await db.task.findMany({
       where: {
         AND: [
           { assigneeId: req.user.id },
           query.completed !== undefined ? { completed: query.completed } : {},
-          // Tasks in projects the assignee can no longer see are left out.
-          visibleTasksWhere(req.user),
+          // Only the current workspace; tasks in projects the assignee can no longer see are left out.
+          visibleTasksWhere(member),
         ],
       },
       include: taskInclude,
@@ -155,6 +173,9 @@ export default async function taskRoutes(app: FastifyInstance) {
       parentId: body.parentId ?? null,
     };
 
+    // Subtasks live in their parent's workspace, project tasks in their project's, personal tasks
+    // in the current workspace.
+    let workspaceId: string | null = null;
     if (placement.parentId) {
       const { task: parent, access } = await findTaskWithAccess(db, req.user, placement.parentId).catch(() => {
         throw notFound('Parent task');
@@ -167,11 +188,24 @@ export default async function taskRoutes(app: FastifyInstance) {
         // One level of subtasks keeps project moves (which re-home direct subtasks) consistent.
         throw validation('Subtasks cannot have subtasks', [{ path: ['parentId'], message: 'Parent is a subtask' }]);
       }
+      if (placement.sectionId && !parent.projectId) {
+        // A section would pull the subtask into a project (maybe in another workspace).
+        throw validation('Subtasks of personal tasks have no section', [{ path: ['sectionId'], message: 'Parent is a personal task' }]);
+      }
       placement.projectId = parent.projectId;
+      workspaceId = parent.workspaceId;
     }
     if (placement.sectionId) placement.projectId = await resolveSection(placement.sectionId, placement.projectId);
-    await assertCanEditProject(req, placement.projectId);
-    if (body.assigneeId) await assertCanBeInvolved(body.assigneeId, placement.projectId, 'assigneeId');
+    if (placement.projectId) {
+      const projectWorkspaceId = await assertCanEditProject(req, placement.projectId);
+      // Defensive: a subtask never lands outside its parent's workspace.
+      if (workspaceId && projectWorkspaceId !== workspaceId) {
+        throw validation('Subtasks belong to their parent’s workspace', [{ path: ['parentId'], message: 'Different workspace' }]);
+      }
+      workspaceId = projectWorkspaceId;
+    }
+    workspaceId ??= (await currentMember(req)).workspaceId;
+    if (body.assigneeId) await assertCanBeInvolved(body.assigneeId, workspaceId, placement.projectId, 'assigneeId');
 
     const position = body.position ?? (await nextPosition(placement, req.user.id));
     const actorId = req.user.id;
@@ -180,6 +214,7 @@ export default async function taskRoutes(app: FastifyInstance) {
       const created = await tx.task.create({
         data: {
           ...placement,
+          workspaceId,
           title: body.title,
           description: body.description ?? null,
           assigneeId: body.assigneeId ?? null,
@@ -194,7 +229,7 @@ export default async function taskRoutes(app: FastifyInstance) {
       await recordActivity(tx, created.id, actorId, 'CREATED');
       if (created.assigneeId) {
         await recordActivity(tx, created.id, actorId, 'ASSIGNED', { assigneeId: created.assigneeId });
-        await notify(tx, 'ASSIGNED', actorId, created.id, [created.assigneeId]);
+        await notify(tx, 'ASSIGNED', actorId, created, [created.assigneeId]);
       }
       return created;
     });
@@ -217,7 +252,13 @@ export default async function taskRoutes(app: FastifyInstance) {
       }
       next.projectId = body.projectId;
       next.sectionId = null; // the old section belongs to the old project
-      await assertCanEditProject(req, next.projectId);
+      if (next.projectId) {
+        const target = await db.project.findUnique({ where: { id: next.projectId }, select: { workspaceId: true } });
+        if (target && target.workspaceId !== task.workspaceId) {
+          throw validation('Tasks can’t move to another workspace', [{ path: ['projectId'], message: 'Project is in another workspace' }]);
+        }
+        await assertCanEditProject(req, next.projectId);
+      }
     }
     if (body.sectionId !== undefined) {
       next.sectionId = body.sectionId;
@@ -232,7 +273,7 @@ export default async function taskRoutes(app: FastifyInstance) {
     const nextAssignee = body.assigneeId === undefined ? task.assigneeId : body.assigneeId;
     const assigneeChanged = body.assigneeId !== undefined && body.assigneeId !== task.assigneeId;
     if (nextAssignee && (assigneeChanged || next.projectId !== task.projectId)) {
-      await assertCanBeInvolved(nextAssignee, next.projectId, 'assigneeId');
+      await assertCanBeInvolved(nextAssignee, task.workspaceId, next.projectId, 'assigneeId');
     }
 
     const data: Prisma.TaskUncheckedUpdateInput = {
@@ -295,14 +336,14 @@ export default async function taskRoutes(app: FastifyInstance) {
       if (body.assigneeId) {
         await log('ASSIGNED', { assigneeId: body.assigneeId });
         await follow(tx, before.id, [body.assigneeId]);
-        await notify(tx, 'ASSIGNED', actorId, before.id, [body.assigneeId]);
+        await notify(tx, 'ASSIGNED', actorId, before, [body.assigneeId]);
       } else {
         await log('UNASSIGNED');
       }
     }
     if (body.completed !== undefined && body.completed !== before.completed) {
       await log(body.completed ? 'COMPLETED' : 'REOPENED');
-      if (body.completed) await notifyFollowers(tx, 'COMPLETED', actorId, before.id);
+      if (body.completed) await notifyFollowers(tx, 'COMPLETED', actorId, before);
     }
   }
 
@@ -323,7 +364,7 @@ export default async function taskRoutes(app: FastifyInstance) {
     const { id } = parse(idParams, req.params);
     const { userId } = parse(FollowerBody, req.body);
     const { task } = await findTaskWithAccess(db, req.user, id);
-    await assertCanBeInvolved(userId, task.projectId, 'userId');
+    await assertCanBeInvolved(userId, task.workspaceId, task.projectId, 'userId');
     await follow(db, id, [userId]);
     return loadTaskDetail(db, id);
   });

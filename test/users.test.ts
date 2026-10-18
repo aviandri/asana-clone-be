@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createUser, login, PASSWORD, setupApp, signedIn } from './helpers.js';
+import { createUser, login, PASSWORD, prisma, setupApp, signedIn } from './helpers.js';
 
 const ctx = setupApp();
 
@@ -99,7 +99,7 @@ describe('admin', () => {
 
   it('lists all users including inactive', async () => {
     const { cookie } = await signedIn(ctx.app, { role: 'ADMIN', name: 'Admin' });
-    await createUser({ name: 'Gone', isActive: false });
+    await createUser({ name: 'Gone', memberActive: false });
     const res = await ctx.app.inject({ method: 'GET', url: '/api/v1/admin/users', headers: { cookie } });
     expect(res.json().data.map((u: { name: string; isActive: boolean }) => [u.name, u.isActive])).toEqual([
       ['Admin', true],
@@ -107,7 +107,7 @@ describe('admin', () => {
     ]);
   });
 
-  it('changes role and deactivates users, but not yourself', async () => {
+  it('changes role and deactivates members; the last active admin can’t be demoted or deactivated (409)', async () => {
     const admin = await signedIn(ctx.app, { role: 'ADMIN' });
     const member = await createUser();
     const res = await ctx.app.inject({
@@ -124,7 +124,18 @@ describe('admin', () => {
       headers: { cookie: admin.cookie },
       payload: { isActive: false },
     });
-    expect(self.statusCode).toBe(400);
+    expect(self.statusCode).toBe(409);
+    expect(self.json().error.code).toBe('CONFLICT');
+
+    // With another active admin, demoting yourself is fine.
+    await prisma.workspaceMember.updateMany({ where: { userId: member.id }, data: { isActive: true } });
+    const demote = await ctx.app.inject({
+      method: 'PATCH',
+      url: `/api/v1/admin/users/${admin.user.id}`,
+      headers: { cookie: admin.cookie },
+      payload: { role: 'MEMBER' },
+    });
+    expect(demote.json()).toMatchObject({ role: 'MEMBER', isActive: true });
   });
 
   it('creates, lists and revokes invites', async () => {
@@ -137,7 +148,7 @@ describe('admin', () => {
     });
     expect(created.statusCode).toBe(201);
     const invite = created.json();
-    expect(Object.keys(invite).sort()).toEqual(['createdAt', 'email', 'expiresAt', 'id', 'inviteUrl', 'role', 'token']);
+    expect(Object.keys(invite).sort()).toEqual(['createdAt', 'email', 'expiresAt', 'id', 'inviteUrl', 'role', 'token', 'workspaceId']);
 
     const list = await ctx.app.inject({ method: 'GET', url: '/api/v1/admin/invites', headers: { cookie } });
     expect(list.json().data).toHaveLength(1);

@@ -63,6 +63,9 @@ describe('login / logout / me', () => {
       role: 'MEMBER',
       isActive: true,
       createdAt: user.createdAt.toISOString(),
+      // SPEC §12: login returns Me.
+      currentWorkspace: expect.objectContaining({ id: user.lastWorkspaceId, myRole: 'MEMBER', memberCount: 1 }),
+      workspaces: [expect.objectContaining({ id: user.lastWorkspaceId, name: 'Test workspace' })],
     });
     const sid = res.cookies.find((c) => c.name === 'sid')!;
     expect(sid.httpOnly).toBe(true);
