@@ -54,7 +54,8 @@ export async function projectAccess(db: PrismaClient, user: User, projectId: str
     member,
     myRole,
     canEdit: isAdmin || myRole !== 'COMMENTER',
-    canManage: isAdmin || myRole === 'OWNER',
+    // Guests never manage projects, even with a (legacy) OWNER membership (SPEC §12 W7).
+    canManage: isAdmin || (myRole === 'OWNER' && member.role !== 'GUEST'),
   };
 }
 

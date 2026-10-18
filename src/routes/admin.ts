@@ -4,7 +4,14 @@ import { conflict, notFound } from '../errors.js';
 import { INVITE_TTL_MS, newInviteToken, toInvite } from '../lib/invites.js';
 import { toUser, userSummarySelect } from '../lib/serialize.js';
 import { email, idParams, parse } from '../lib/validate.js';
-import { assertNotLastAdmin, assertRoleAllowed, currentMember, removeFromWorkspaceContent, seniorAdminId } from '../lib/workspaces.js';
+import {
+  assertNotLastAdmin,
+  assertRoleAllowed,
+  currentMember,
+  demoteToGuests,
+  removeFromWorkspaceContent,
+  seniorAdminId,
+} from '../lib/workspaces.js';
 import { requireAdmin } from '../plugins/auth.js';
 
 const role = z.enum(['ADMIN', 'MEMBER', 'GUEST']);
@@ -46,12 +53,12 @@ export default async function adminRoutes(app: FastifyInstance) {
       // Deactivation removes them from the workspace's teams and projects; the acting admin
       // inherits projects that would be left without an owner. Admins deactivating themselves
       // hand them on like leave does: to the longest-standing other admin.
+      const heirId = () => (id === admin.user.id ? seniorAdminId(tx, workspaceId, id) : Promise.resolve(admin.user.id));
       if (deactivated) {
-        const heirId = id === admin.user.id ? await seniorAdminId(tx, workspaceId, id) : admin.user.id;
-        await removeFromWorkspaceContent(tx, workspaceId, id, heirId);
+        await removeFromWorkspaceContent(tx, workspaceId, id, await heirId());
       } else if (body.role === 'GUEST' && existing.role !== 'GUEST') {
-        // Guests can't be in teams; their project memberships stay.
-        await tx.teamMember.deleteMany({ where: { userId: id, team: { workspaceId } } });
+        // Guests leave teams and lose project OWNER rights (W4/W7); projects keep an owner.
+        await demoteToGuests(tx, workspaceId, [id], await heirId());
       }
       return tx.workspaceMember.update({ where: key, data: body, include: { user: true } });
     });

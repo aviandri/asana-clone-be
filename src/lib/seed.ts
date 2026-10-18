@@ -503,22 +503,25 @@ export async function seedWorkspacesDemo(app: FastifyInstance): Promise<{ tasks:
       members: { create: [{ userId: ids.alice, role: 'ADMIN' }, { userId: ids.bob, role: 'MEMBER' }] },
     },
   });
-  // The guest's only workspace is Acme Pilot, so it is also their current one.
-  const guest =
-    (await db.user.findUnique({ where: { email: GUEST_EMAIL } })) ??
-    (await db.user.create({
-      data: {
-        email: GUEST_EMAIL,
-        name: 'Gita Guest',
-        avatarColor: '#aa62e3',
-        passwordHash: await hashPassword(SEED_PASSWORD),
-        lastWorkspaceId: workspace.id,
-      },
-    }));
-  await db.workspaceMember.create({ data: { workspaceId: workspace.id, userId: guest.id, role: 'GUEST' } });
   const cookie = (id: string) => `${SESSION_COOKIE}=${app.jwt.sign({ sub: id })}`;
   const call = makeCaller(app, { alice: cookie(ids.alice), bob: cookie(ids.bob) }, workspace.id);
+  let createdGuestId: string | null = null;
   try {
+    // The guest's only workspace is Acme Pilot, so it is also their current one.
+    let guest = await db.user.findUnique({ where: { email: GUEST_EMAIL } });
+    if (!guest) {
+      guest = await db.user.create({
+        data: {
+          email: GUEST_EMAIL,
+          name: 'Gita Guest',
+          avatarColor: '#aa62e3',
+          passwordHash: await hashPassword(SEED_PASSWORD),
+          lastWorkspaceId: workspace.id,
+        },
+      });
+      createdGuestId = guest.id;
+    }
+    await db.workspaceMember.create({ data: { workspaceId: workspace.id, userId: guest.id, role: 'GUEST' } });
     const team = await call('alice', 'POST', '/teams', { name: 'Pilot Team', description: 'Everyone running the Acme pilot.' });
     await call('alice', 'POST', `/teams/${team.id}/members`, { userId: ids.bob });
     const project = await call<{ id: string; sections: { id: string }[] }>('alice', 'POST', '/projects', {
@@ -548,7 +551,10 @@ export async function seedWorkspacesDemo(app: FastifyInstance): Promise<{ tasks:
     });
     return { tasks: ACME_TASKS.length };
   } catch (err) {
-    await db.$transaction((tx) => deleteWorkspace(tx, workspace.id));
+    await db.$transaction(async (tx) => {
+      await deleteWorkspace(tx, workspace.id);
+      if (createdGuestId) await tx.user.delete({ where: { id: createdGuestId } });
+    });
     throw err;
   }
 }

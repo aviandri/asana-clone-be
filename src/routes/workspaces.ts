@@ -6,9 +6,11 @@ import { hexColor, idParams, parse } from '../lib/validate.js';
 import {
   assertNotLastAdmin,
   deleteWorkspace,
+  demoteToGuests,
   emailDomain,
   listWorkspaces,
   loadWorkspace,
+  lockAdmins,
   removeFromWorkspaceContent,
   requireMember,
   seniorAdminId,
@@ -83,8 +85,11 @@ export default async function workspaceRoutes(app: FastifyInstance) {
     const { id } = parse(idParams, req.params);
     const body = parse(UpdateBody, req.body);
     requireAdmin(await requireMember(db, req.user, id, 'Workspace'));
-
     const convertedToGuests = await db.$transaction(async (tx) => {
+      // Conversion can demote admins: take the same lock as the last-admin check (and re-check
+      // that the caller is still an admin once it's held).
+      await lockAdmins(tx, id);
+      requireAdmin(await requireMember(tx, req.user, id, 'Workspace'));
       const current = await tx.workspace.findUniqueOrThrow({ where: { id } });
       const isOrganization = body.isOrganization ?? current.isOrganization;
       const nextDomain = isOrganization ? (body.domain !== undefined ? body.domain : current.domain) : null;
@@ -94,29 +99,32 @@ export default async function workspaceRoutes(app: FastifyInstance) {
       if (isOrganization && !nextDomain) {
         throw validation('An organization needs a domain', [{ path: ['domain'], message: 'Required for an organization' }]);
       }
+      // Turning it off (or not touching it) leaves roles alone.
+      const converting = !!nextDomain && !(current.isOrganization && current.domain === nextDomain);
+      if (converting) {
+        if (emailDomain(req.user.email) !== nextDomain) {
+          throw validation('Your own email must be on the organization’s domain', [{ path: ['domain'], message: 'Not your email domain' }]);
+        }
+        // Checked first for the specific message; the unique index still catches a race (409 too).
+        if (await tx.workspace.count({ where: { domain: nextDomain, id: { not: id } } })) {
+          throw conflict('Another workspace already uses this domain');
+        }
+      }
       await tx.workspace.update({
         where: { id },
         data: { name: body.name, color: body.color, isOrganization, domain: nextDomain },
       });
-      // Turning it off (or not touching it) leaves roles alone.
-      if (!nextDomain || (current.isOrganization && current.domain === nextDomain)) return undefined;
+      if (!converting) return undefined;
 
-      if (emailDomain(req.user.email) !== nextDomain) {
-        throw validation('Your own email must be on the organization’s domain', [{ path: ['domain'], message: 'Not your email domain' }]);
-      }
-      if (await tx.workspace.count({ where: { domain: nextDomain, id: { not: id } } })) {
-        throw conflict('Another workspace already uses this domain');
-      }
-      // Everyone off the domain becomes a guest (and leaves the teams, which guests can't be in);
-      // pending invites to them become guest invites.
+      // Everyone off the domain becomes a guest (W4/W5/W7: out of teams, no project OWNER rights;
+      // the caller inherits projects left without an owner). Pending invites to them become guest
+      // invites.
       const offDomain = { NOT: { email: { endsWith: `@${nextDomain}` } } };
       const demoted = await tx.workspaceMember.findMany({
         where: { workspaceId: id, role: { not: 'GUEST' }, user: offDomain },
         select: { userId: true, isActive: true },
       });
-      const userIds = demoted.map((m) => m.userId);
-      await tx.workspaceMember.updateMany({ where: { workspaceId: id, userId: { in: userIds } }, data: { role: 'GUEST' } });
-      await tx.teamMember.deleteMany({ where: { userId: { in: userIds }, team: { workspaceId: id } } });
+      await demoteToGuests(tx, id, demoted.map((m) => m.userId), req.user.id);
       await tx.invite.updateMany({
         where: { workspaceId: id, acceptedAt: null, role: { not: 'GUEST' }, NOT: { email: { endsWith: `@${nextDomain}` } } },
         data: { role: 'GUEST' },
@@ -164,11 +172,11 @@ export default async function workspaceRoutes(app: FastifyInstance) {
   // --- my invites (existing accounts) --------------------------------------------------
 
   /** A pending invite to my email, or 404 (someone else's invite looks the same as none). */
-  async function findMyInvite(inviteId: string, email: string) {
+  async function findMyInvite(inviteId: string, email: string, { allowExpired = false } = {}) {
     const invite = await db.invite.findUnique({ where: { id: inviteId } });
     if (!invite || invite.email !== email) throw notFound('Invite');
     if (invite.acceptedAt) throw new AppError('GONE', 'This invite has already been used');
-    if (invite.expiresAt.getTime() <= Date.now()) throw new AppError('GONE', 'This invite has expired');
+    if (!allowExpired && invite.expiresAt.getTime() <= Date.now()) throw new AppError('GONE', 'This invite has expired');
     return invite;
   }
 
@@ -217,7 +225,8 @@ export default async function workspaceRoutes(app: FastifyInstance) {
 
   app.delete('/me/invites/:id', async (req, reply) => {
     const { id } = parse(idParams, req.params);
-    await findMyInvite(id, req.user.email);
+    // Declining an expired invite just clears it away.
+    await findMyInvite(id, req.user.email, { allowExpired: true });
     await db.invite.delete({ where: { id } });
     return reply.status(204).send();
   });

@@ -107,6 +107,47 @@ describe('GUEST role (SPEC §12)', () => {
     expect((await req(gus, 'PATCH', `/workspaces/${ws}`, { name: 'x' })).statusCode).toBe(403);
   });
 
+  it('GET /users/:id only finds people who share a project with the guest', async () => {
+    const other = await signedIn(ctx.app, { name: 'Otto', email: 'otto@mekari.com' });
+    expect((await req(gus, 'GET', `/users/${other.user.id}`)).statusCode).toBe(404);
+    expect((await req(gus, 'GET', `/users/${admin.user.id}`)).statusCode).toBe(200); // shares Shared
+    expect((await req(gus, 'GET', `/users/${gus.user.id}`)).statusCode).toBe(200);
+    expect((await req(mia, 'GET', `/users/${other.user.id}`)).statusCode).toBe(200);
+  });
+
+  it('W7: guests never manage projects and can’t be made OWNER', async () => {
+    // A legacy OWNER membership doesn't give a guest manage rights.
+    await prisma.projectMember.update({
+      where: { projectId_userId: { projectId: shared.id, userId: gus.user.id } },
+      data: { role: 'OWNER' },
+    });
+    expect((await req(gus, 'PATCH', `/projects/${shared.id}`, { privacy: 'PUBLIC' })).statusCode).toBe(403);
+    expect((await req(gus, 'POST', `/projects/${shared.id}/members`, { userId: mia.user.id })).statusCode).toBe(403);
+    await prisma.projectMember.update({
+      where: { projectId_userId: { projectId: shared.id, userId: gus.user.id } },
+      data: { role: 'EDITOR' },
+    });
+
+    const promote = await req(admin, 'PATCH', `/projects/${shared.id}/members/${gus.user.id}`, { role: 'OWNER' });
+    expect(promote.statusCode).toBe(400);
+    expect(promote.json().error.details).toEqual([expect.objectContaining({ path: ['role'] })]);
+    const guest2 = await signedIn(ctx.app, { name: 'Gwen', email: 'gwen@partner.test', role: 'GUEST' });
+    expect((await req(admin, 'POST', `/projects/${shared.id}/members`, { userId: guest2.user.id, role: 'OWNER' })).statusCode).toBe(400);
+    expect((await req(admin, 'POST', `/projects/${shared.id}/members`, { userId: guest2.user.id, role: 'EDITOR' })).statusCode).toBe(200);
+  });
+
+  it('W7: demoting a project owner to GUEST makes them EDITOR; an ownerless project passes to the acting admin', async () => {
+    const mine = await ok<{ id: string }>(await req(mia, 'POST', '/projects', { teamId: team.id, name: 'Mia’s', privacy: 'PRIVATE' }));
+    await ok(await req(admin, 'PATCH', `/admin/users/${mia.user.id}`, { role: 'GUEST' }));
+    const after = await prisma.project.findUniqueOrThrow({ where: { id: mine.id }, include: { members: true } });
+    expect(after.ownerId).toBe(admin.user.id);
+    expect(Object.fromEntries(after.members.map((m) => [m.userId, m.role]))).toEqual({
+      [mia.user.id]: 'EDITOR',
+      [admin.user.id]: 'OWNER',
+    });
+    expect((await req(mia, 'GET', `/projects/${mine.id}`)).statusCode).toBe(200); // still a member
+  });
+
   it('demoting a member to GUEST removes their team memberships but keeps project ones', async () => {
     await ok(await req(admin, 'POST', `/projects/${shared.id}/members`, { userId: mia.user.id }));
     expect(await ok(await req(admin, 'PATCH', `/admin/users/${mia.user.id}`, { role: 'GUEST' }))).toMatchObject({ role: 'GUEST' });
@@ -123,6 +164,7 @@ describe('organizations', () => {
   it('converting turns off-domain members into guests and reports how many', async () => {
     const outsider = await signedIn(ctx.app, { name: 'Ext', email: 'ext@agency.test' });
     await ok(await req(admin, 'POST', `/teams/${team.id}/members`, { userId: outsider.user.id }));
+    const theirs = await ok(await req(outsider, 'POST', '/projects', { teamId: team.id, name: 'Ext’s', privacy: 'PRIVATE' }));
     await ok(await req(admin, 'POST', '/admin/invites', { email: 'pending@agency.test', role: 'MEMBER' }));
 
     const res = await ok<{ isOrganization: boolean; domain: string; convertedToGuests: number }>(await convert());
@@ -136,6 +178,13 @@ describe('organizations', () => {
     });
     expect(await prisma.teamMember.count({ where: { userId: outsider.user.id } })).toBe(0);
     expect((await prisma.invite.findFirstOrThrow({ where: { email: 'pending@agency.test' } })).role).toBe('GUEST');
+    // W7: their project passes to the admin who converted; they stay on it as EDITOR.
+    const project = await prisma.project.findUniqueOrThrow({ where: { id: theirs.id }, include: { members: true } });
+    expect(project.ownerId).toBe(admin.user.id);
+    expect(Object.fromEntries(project.members.map((m) => [m.userId, m.role]))).toEqual({
+      [outsider.user.id]: 'EDITOR',
+      [admin.user.id]: 'OWNER',
+    });
 
     // Renaming doesn't re-run the conversion; turning it off clears the domain and keeps roles.
     expect(await ok(await req(admin, 'PATCH', `/workspaces/${ws}`, { name: 'Renamed' }))).not.toHaveProperty('convertedToGuests');
@@ -153,7 +202,9 @@ describe('organizations', () => {
     expect((await prisma.workspace.findUniqueOrThrow({ where: { id: ws } })).isOrganization).toBe(false);
 
     await prisma.workspace.create({ data: { name: 'Other', color: '#000000', isOrganization: true, domain: 'mekari.com' } });
-    expect((await convert()).statusCode).toBe(409);
+    const taken = await convert();
+    expect(taken.statusCode).toBe(409);
+    expect(taken.json().error.message).toBe('Another workspace already uses this domain');
   });
 
   it('invites and role changes: external people can only be guests', async () => {
@@ -278,6 +329,14 @@ describe('/me/invites (existing accounts)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ id: ws, myRole: 'MEMBER' });
     expect((await prisma.invite.findUniqueOrThrow({ where: { id: invite.id } })).acceptedAt).not.toBeNull();
+  });
+
+  it('declining an expired invite succeeds (accepting it is 410)', async () => {
+    const invite = await ok<{ id: string }>(await req(admin, 'POST', '/admin/invites', { email: 'pat@mekari.com', role: 'MEMBER' }));
+    await prisma.invite.update({ where: { id: invite.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    expect((await req(pat, 'POST', `/me/invites/${invite.id}/accept`)).statusCode).toBe(410);
+    expect((await req(pat, 'DELETE', `/me/invites/${invite.id}`)).statusCode).toBe(204);
+    expect(await prisma.invite.count({ where: { id: invite.id } })).toBe(0);
   });
 
   it('only one pending invite per workspace and email (re-inviting replaces it)', async () => {

@@ -564,3 +564,9 @@ on one project, one team, one project with ~8 tasks. `npm run seed -- --workspac
   invite accept can't bring an external MEMBER back. `convertedToGuests` counts active members only.
 - **W6** Accepting an invite to a workspace you're already an active member of keeps your role
   unchanged; the invite is still marked accepted, so it leaves `/me/invites`.
+- **W7** Guests never manage projects: `canManage` is false for a GUEST even with an OWNER membership,
+  and making a GUEST a project OWNER (`POST`/`PATCH /projects/:id/members`) → `400 VALIDATION` on
+  `role`. When someone becomes a GUEST (role change or organization conversion), their OWNER project
+  memberships become EDITOR; a project left without an OWNER passes to the acting admin (to the
+  longest-standing other admin if the admin demoted themselves), as with deactivation. Guests also
+  only find people who share a project with them by id (`GET /users/:id` → `404` otherwise).

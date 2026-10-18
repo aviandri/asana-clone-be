@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { ProjectRole, WorkspaceRole } from '@prisma/client';
 import { z } from 'zod';
 import { conflict, forbidden, notFound, validation } from '../errors.js';
 import { assertCanEdit, assertCanManage, projectAccess, visibleProjectsWhere } from '../lib/access.js';
@@ -127,11 +128,13 @@ export default async function projectRoutes(app: FastifyInstance) {
     assertCanManage(access);
     const user = await app.db.user.findUnique({ where: { id: body.userId } });
     if (!user || !user.isActive) throw notFound('User');
-    if (!(await findMember(app.db, user, access.member.workspaceId))) {
+    const target = await findMember(app.db, user, access.member.workspaceId);
+    if (!target) {
       throw validation('User is not an active member of this workspace', [
         { path: ['userId'], message: 'Not an active workspace member' },
       ]);
     }
+    assertNotGuestOwner(target.role, body.role);
     const existing = await app.db.projectMember.findUnique({
       where: { projectId_userId: { projectId: id, userId: body.userId } },
     });
@@ -139,6 +142,13 @@ export default async function projectRoutes(app: FastifyInstance) {
     await app.db.projectMember.create({ data: { projectId: id, userId: body.userId, role: body.role } });
     return loadProjectDetail(app.db, id, req.user.id);
   });
+
+  /** Guests can't be project OWNERs (SPEC §12 W7). */
+  function assertNotGuestOwner(workspaceRole: WorkspaceRole, role: ProjectRole) {
+    if (workspaceRole === 'GUEST' && role === 'OWNER') {
+      throw validation('Guests can’t own projects', [{ path: ['role'], message: 'Guests can’t own projects' }]);
+    }
+  }
 
   /** A project always keeps at least one OWNER member, so its settings stay manageable. */
   async function assertKeepsAnOwner(projectId: string, userId: string) {
@@ -167,9 +177,15 @@ export default async function projectRoutes(app: FastifyInstance) {
   app.patch('/projects/:id/members/:userId', async (req) => {
     const { id, userId } = parse(MemberParams, req.params);
     const { role } = parse(UpdateMemberBody, req.body);
-    assertCanManage(await projectAccess(app.db, req.user, id));
+    const access = await projectAccess(app.db, req.user, id);
+    assertCanManage(access);
     const member = await app.db.projectMember.findUnique({ where: { projectId_userId: { projectId: id, userId } } });
     if (!member) throw notFound('Project member');
+    const target = await app.db.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId: access.member.workspaceId, userId } },
+      select: { role: true },
+    });
+    if (target) assertNotGuestOwner(target.role, role);
     if (member.role === 'OWNER' && role !== 'OWNER') await assertKeepsAnOwner(id, userId);
     await app.db.projectMember.update({ where: { projectId_userId: { projectId: id, userId } }, data: { role } });
     await syncOwner(id);

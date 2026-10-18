@@ -194,7 +194,7 @@ export async function loadMe(db: Db, user: User, opts: { req?: FastifyRequest; w
 /** 409 if the user is the workspace's last active ADMIN (they can't leave, be demoted or deactivated). */
 export async function assertNotLastAdmin(db: Db, workspaceId: string, userId: string) {
   // Lock the workspace's admin rows, so two admins demoting each other at once can't both pass.
-  await db.$queryRaw`SELECT 1 FROM "WorkspaceMember" WHERE "workspaceId" = ${workspaceId}::uuid AND "role" = 'ADMIN' FOR UPDATE`;
+  await lockAdmins(db, workspaceId);
   const target = await db.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId, userId } } });
   if (!target || target.role !== 'ADMIN' || !target.isActive) return;
   const others = await db.workspaceMember.count({
@@ -225,9 +225,31 @@ export async function removeFromWorkspaceContent(tx: Prisma.TransactionClient, w
   });
   await tx.projectMember.deleteMany({ where: { userId, project: { workspaceId } } });
   const ownerOf = await tx.project.findMany({ where: { workspaceId, ownerId: userId }, select: { id: true } });
+  await ensureProjectOwners(tx, [...memberOf.map((m) => m.projectId), ...ownerOf.map((p) => p.id)], heirId);
+}
 
-  // Each project they were in or owned keeps an OWNER member, and Project.owner points at one.
-  for (const projectId of new Set([...memberOf.map((m) => m.projectId), ...ownerOf.map((p) => p.id)])) {
+/**
+ * Turning members into GUESTs (role change or organization conversion, SPEC §12 W4/W7): they leave
+ * the workspace's teams, and keep their project memberships, but OWNER ones become EDITOR (guests
+ * can't manage projects). Projects left without an OWNER pass to `heirId`.
+ */
+export async function demoteToGuests(tx: Prisma.TransactionClient, workspaceId: string, userIds: string[], heirId: string | null) {
+  if (userIds.length === 0) return;
+  await tx.workspaceMember.updateMany({ where: { workspaceId, userId: { in: userIds } }, data: { role: 'GUEST' } });
+  await tx.teamMember.deleteMany({ where: { userId: { in: userIds }, team: { workspaceId } } });
+  const owned = { userId: { in: userIds }, role: 'OWNER' as const, project: { workspaceId } };
+  const ownerOf = await tx.projectMember.findMany({ where: owned, select: { projectId: true } });
+  await tx.projectMember.updateMany({ where: owned, data: { role: 'EDITOR' } });
+  const pointedAt = await tx.project.findMany({ where: { workspaceId, ownerId: { in: userIds } }, select: { id: true } });
+  await ensureProjectOwners(tx, [...ownerOf.map((m) => m.projectId), ...pointedAt.map((p) => p.id)], heirId);
+}
+
+/**
+ * Each project keeps an OWNER member, and Project.owner points at one: the first OWNER by name, or
+ * `heirId` (made OWNER) when none is left.
+ */
+async function ensureProjectOwners(tx: Prisma.TransactionClient, projectIds: string[], heirId: string | null) {
+  for (const projectId of new Set(projectIds)) {
     const project = await tx.project.findUniqueOrThrow({ where: { id: projectId }, select: { ownerId: true } });
     const owners = await tx.projectMember.findMany({
       where: { projectId, role: 'OWNER' },
@@ -247,6 +269,11 @@ export async function removeFromWorkspaceContent(tx: Prisma.TransactionClient, w
       await tx.project.update({ where: { id: projectId }, data: { ownerId: heirId } });
     }
   }
+}
+
+/** Locks the workspace's ADMIN membership rows until the transaction ends (last-admin checks). */
+export async function lockAdmins(tx: Db, workspaceId: string) {
+  await tx.$queryRaw`SELECT 1 FROM "WorkspaceMember" WHERE "workspaceId" = ${workspaceId}::uuid AND "role" = 'ADMIN' ORDER BY "userId" FOR UPDATE`;
 }
 
 /** Deletes a workspace and everything in it. */

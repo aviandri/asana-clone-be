@@ -63,13 +63,18 @@ export default async function userRoutes(app: FastifyInstance) {
 
   app.get('/users/:id', async (req) => {
     const { id } = parse(idParams, req.params);
-    const { workspaceId } = await currentMember(req);
+    const member = await currentMember(req);
+    const { workspaceId } = member;
     // Members of the current workspace only (incl. deactivated ones, who still appear on old tasks).
     const membership = await app.db.workspaceMember.findUnique({
       where: { workspaceId_userId: { workspaceId, userId: id } },
       include: { user: true },
     });
     if (!membership) throw notFound('User');
+    // Guests only see people who share a project with them, even by id (SPEC §12).
+    if (member.role === 'GUEST' && !(await app.db.user.count({ where: { AND: [{ id }, pickableUsersWhere(member)] } }))) {
+      throw notFound('User');
+    }
     return toUser(membership.user, { role: membership.role, isActive: membership.isActive && membership.user.isActive });
   });
 }
