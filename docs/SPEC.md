@@ -551,7 +551,7 @@ on one project, one team, one project with ~8 tasks. `npm run seed -- --workspac
 - **Guest experience.** A "Guest" pill next to the workspace name. Hide Teams browse, Goals,
   Workload and "New project", and show a small "You're a guest in X" note in the sidebar.
 
-### Clarifications (agreed, W1–W6)
+### Clarifications (agreed, W1–W8)
 - **W1** Guests: `GET /teams` → `{data: []}`; `/teams/:id…` → `404` (guests are never team members).
 - **W2** Guests can't own goals or key results: `ownerId` naming a GUEST → `400 VALIDATION` on `ownerId`.
 - **W3** A member an admin deactivated can't rejoin through the domain: `POST /workspaces/:id/join` →
