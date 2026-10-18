@@ -1,4 +1,4 @@
-# Asana Clone — Product & API Spec (v1)
+# Mekari Project — Product & API Spec (v1)
 
 Internal project-management tool for a ~100-employee company. One workspace (the company).
 This file is the **contract** between `asana-clone-be` and `asana-clone-fe`. The copy in the BE repo
