@@ -262,6 +262,24 @@ describe('/me/invites (existing accounts)', () => {
     expect(await prisma.invite.count({ where: { id: second.id } })).toBe(0);
   });
 
+  it('W6: accepting while already an active member keeps the role and marks the invite accepted', async () => {
+    // Admin invites refuse active members (409), so this one predates Mia joining.
+    const invite = await prisma.invite.create({
+      data: {
+        workspaceId: ws,
+        email: 'mia@mekari.com',
+        role: 'GUEST',
+        token: 'stale',
+        invitedById: admin.user.id,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      },
+    });
+    const res = await req(mia, 'POST', `/me/invites/${invite.id}/accept`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ id: ws, myRole: 'MEMBER' });
+    expect((await prisma.invite.findUniqueOrThrow({ where: { id: invite.id } })).acceptedAt).not.toBeNull();
+  });
+
   it('only one pending invite per workspace and email (re-inviting replaces it)', async () => {
     await ok(await req(admin, 'POST', '/admin/invites', { email: 'pat@mekari.com', role: 'MEMBER' }));
     await ok(await req(admin, 'POST', '/admin/invites', { email: 'pat@mekari.com', role: 'GUEST' }));
