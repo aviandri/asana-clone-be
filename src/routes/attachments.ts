@@ -161,7 +161,14 @@ export default async function attachmentRoutes(app: FastifyInstance) {
 
   /** A12: refuse when this upload could leave less than STORAGE_MIN_FREE_BYTES free (507). */
   async function assertRoom(expectedBytes: number) {
-    const free = await storage.freeBytes?.();
+    let free: number | undefined;
+    try {
+      free = await storage.freeBytes?.();
+    } catch (err) {
+      // Can't tell: refuse (fail closed), as "no space" rather than a 500.
+      app.log.error({ err }, 'Could not read free space on STORAGE_DIR');
+      free = 0;
+    }
     if (free !== undefined && free - expectedBytes < app.config.STORAGE_MIN_FREE_BYTES) {
       throw new AppError('INSUFFICIENT_STORAGE', 'The server is out of space for attachments; try again later');
     }
@@ -179,17 +186,20 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     if (query.draft === false && !access.canEdit) throw commenterOnly();
     if (!req.isMultipart()) throw validation('Expected multipart/form-data with one part named "file"');
     const userId = req.user.id;
+    // Check and take the slot in one synchronous step: with an await between them, parallel requests would
+    // all pass the check. Everything after this releases it in the finally below.
     if ((inFlight.get(userId) ?? 0) >= 3) throw new AppError('RATE_LIMITED', 'Too many uploads at once; wait for one to finish');
-    if (query.draft === true && (await draftBytes(userId)) >= DRAFT_QUOTA) throw draftQuotaError();
-    // The body's length is an upper bound for the file (all of it when the client sends none).
-    const declared = Number(req.headers['content-length']);
-    await assertRoom(Number.isFinite(declared) && declared > 0 ? Math.min(declared, maxBytes) : maxBytes);
-    limiter.hit(userId);
+    inFlight.set(userId, (inFlight.get(userId) ?? 0) + 1);
 
     let draftField: boolean | undefined;
     let stored: Awaited<ReturnType<typeof store>> | undefined;
-    inFlight.set(userId, (inFlight.get(userId) ?? 0) + 1);
     try {
+      if (query.draft === true && (await draftBytes(userId)) >= DRAFT_QUOTA) throw draftQuotaError();
+      // The body's length is an upper bound for the file (all of it when the client sends none).
+      const declared = Number(req.headers['content-length']);
+      await assertRoom(Number.isFinite(declared) && declared > 0 ? Math.min(declared, maxBytes) : maxBytes);
+      limiter.hit(userId);
+
       for await (const part of req.parts()) {
         if (part.type === 'field') {
           if (part.fieldname === 'draft') draftField = part.value === 'true';
