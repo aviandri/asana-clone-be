@@ -731,3 +731,15 @@ type Attachment = {
   through. Uploads show progress, can be cancelled, failures offer Retry.
 - Never render file content as HTML; never put `url` in an `<a>`/open call unless it is
   `http`/`https`.
+
+### Clarifications (agreed, A1–A10)
+- **A1** 100 MB = **104,857,600 bytes** (`MAX_UPLOAD_BYTES`, default that). Clients pre-check the same number.
+- **A2** `StorageDriver` also has `list() → {key, mtime}` for the orphan sweep. Thumbnails use derived keys (`<key>.s.webp`, `<key>.l.webp`).
+- **A3** Draft uploads are marked with the **query parameter `?draft=true`** (`POST /tasks/:id/attachments?draft=true`), so permission is decided before the body streams. A multipart `draft` field is also accepted.
+- **A4** Formats sharp can't decode (BMP, HEIC…) → valid file, no thumbnail, `width`/`height` null.
+- **A5** The upload rate limit (60 / 10 min per user) counts file and link creations together.
+- **A6** `DELETE /attachments/:id` and `POST /attachments/:id/refresh-preview` are ID-addressed (ignore `X-Workspace-Id`); a non-member → `404`.
+- **A7** Personal tasks: delete by the uploader, the task creator, or a workspace `ADMIN`.
+- **A8** Removing a task-level attachment also bumps the task's `updatedAt`.
+- **A9** `PATCH /comments/:id` may leave `body` empty when the comment has attachments.
+- **A10** Seeded LINKs use preset `READY` metadata, with no network access.
