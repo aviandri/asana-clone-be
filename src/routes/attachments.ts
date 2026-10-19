@@ -45,16 +45,27 @@ export class UploadLimiter {
 }
 
 /**
- * Headers on every byte response (SPEC §13 Serving): files are user content on the app's own origin, so
- * the browser must never sniff them into HTML, run them, or let another origin embed them.
+ * Headers on every response from a byte route (SPEC §13 Serving), errors, 304 and 416 included: files are
+ * user content on the app's own origin, so the browser must never sniff them into HTML, run them, or let
+ * another origin embed them.
  */
+const SERVING_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Content-Security-Policy': "sandbox; default-src 'none'; img-src 'self'; media-src 'self'",
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Cache-Control': 'private, max-age=0, must-revalidate',
+} as const;
+
+/** Route option for the byte routes: the headers go on in onSend, after whatever the handler or error handler did. */
+const servedBytes = {
+  onSend: async (_req: FastifyRequest, reply: FastifyReply, payload: unknown) => {
+    reply.headers(SERVING_HEADERS);
+    return payload;
+  },
+};
+
 function servingHeaders(reply: FastifyReply, etag: string) {
-  reply
-    .header('X-Content-Type-Options', 'nosniff')
-    .header('Content-Security-Policy', "sandbox; default-src 'none'; img-src 'self'; media-src 'self'")
-    .header('Cross-Origin-Resource-Policy', 'same-origin')
-    .header('Cache-Control', 'private, max-age=0, must-revalidate')
-    .header('ETag', etag);
+  reply.headers(SERVING_HEADERS).header('ETag', etag);
 }
 
 /** True when If-None-Match names this (strong) ETag, or `*`. */
@@ -198,7 +209,7 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     return toAttachment(attachment);
   });
 
-  app.get('/attachments/:id/content', async (req, reply) => {
+  app.get('/attachments/:id/content', servedBytes, async (req, reply) => {
     const { id } = parse(idParams, req.params);
     const { download } = parse(ContentQuery, req.query);
     const { attachment } = await findVisibleAttachment(db, req.user, id);
@@ -230,7 +241,7 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     return reply.header('Content-Length', size).send(size === 0 ? '' : storage.get(storageKey));
   });
 
-  app.get('/attachments/:id/thumbnail', async (req, reply) => {
+  app.get('/attachments/:id/thumbnail', servedBytes, async (req, reply) => {
     const { id } = parse(idParams, req.params);
     const { size } = parse(ThumbnailQuery, req.query);
     const { attachment } = await findVisibleAttachment(db, req.user, id);
