@@ -52,8 +52,8 @@ docker-compose (postgres + be + fe/nginx).
 - Auth: cookie `sid` (httpOnly, SameSite=Lax, Secure in prod) holding a signed JWT (7d).
   Every endpoint except `/auth/login`, `/auth/accept-invite`, `/health` requires auth → `401`.
 - List responses: `{ "data": [...] }`. Single resources: the object itself.
-- Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "GONE" | "RATE_LIMITED" | "PAYLOAD_TOO_LARGE" | "INTERNAL", "message": string, "details"?: any } }`
-  with matching HTTP status (404/400/401/403/409/410/429/413/500). `GONE` = used or expired invite; `RATE_LIMITED` = too many login / accept-invite attempts.
+- Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "GONE" | "RATE_LIMITED" | "PAYLOAD_TOO_LARGE" | "INSUFFICIENT_STORAGE" | "INTERNAL", "message": string, "details"?: any } }`
+  with matching HTTP status (404/400/401/403/409/410/429/413/507/500). `GONE` = used or expired invite; `RATE_LIMITED` = too many login / accept-invite attempts.
 - `error.details` (when present, e.g. on `VALIDATION`) is a zod-style issue array: `[{ "path": ["assigneeId"], "message": "..." }]`.
 - `POST` endpoints that create a resource return `201` (FE: treat any 2xx as success)..
 - Ordering uses float `position`. Clients compute a position between neighbours
@@ -746,3 +746,4 @@ type Attachment = {
 - **A9** `PATCH /comments/:id` may leave `body` empty when the comment has attachments.
 - **A10** Seeded LINKs use preset `READY` metadata, with no network access.
 - **A11** LINK attachments expose `iconPath` / `imagePath` (null unless `hasIcon` / `hasImage`); clients never build attachment URLs by hand. Provider icons are neutral, app-drawn badges (initials + name), not third-party logos.
+- **A12** Upload quotas: per user, at most **3 concurrent uploads** and **1 GiB of unposted drafts** (beyond that → `429 RATE_LIMITED`). The server refuses an upload when free space on `STORAGE_DIR` would fall below `STORAGE_MIN_FREE_BYTES` (default 2 GiB) → `507` with new error code **`INSUFFICIENT_STORAGE`**. Image processing is limited process-wide (≤ 2 at once). Filenames also lose lone surrogates (→ U+FFFD) and invisible format characters (`\p{Cf}` except ZWJ).
