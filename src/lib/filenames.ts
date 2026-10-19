@@ -3,9 +3,13 @@
  * `name` is shown as given and only ever reaches HTTP through [contentDisposition].
  */
 
-// C0/C1 controls and DEL, plus the bidi/format controls that can disguise an extension
-// ("invoice\u202Etxt.exe" shows as "invoiceexe.txt").
-const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g;
+// Every invisible format character (\p{Cf}: bidi controls that can disguise an extension,
+// "invoice\u202Etxt.exe" showing as "invoiceexe.txt", zero-width spaces, soft hyphens, BOM, tags), except
+// ZWJ, which joins emoji (A12). Removed first: JS counts U+FEFF as whitespace.
+const FORMAT = /(?!\u200D)\p{Cf}/gu;
+// Controls (C0, C1, DEL): after whitespace (tabs, newlines) has become spaces.
+const CONTROLS = /\p{Cc}/gu;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 const MAX_BYTES = 255;
 
 const utf8Length = (s: string) => Buffer.byteLength(s, 'utf8');
@@ -21,9 +25,10 @@ function cutToBytes(s: string, bytes: number): string {
 }
 
 export function sanitizeFilename(raw: string | undefined | null): string {
-  const base = (raw ?? '').split(/[/\\]/).pop() ?? '';
-  // Whitespace (tabs, newlines included) collapses to one space first; other controls just go.
-  const name = base.replace(/\s+/g, ' ').replace(CONTROLS, '').replace(/ {2,}/g, ' ').trim();
+  // Lone surrogates (a broken UTF-16 filename*) become U+FFFD: they aren't valid UTF-8 for the DB.
+  const base = (raw ?? '').replace(LONE_SURROGATE, '\uFFFD').split(/[/\\]/).pop() ?? '';
+  // Format characters go; whitespace (tabs, newlines included) collapses to one space; other controls go.
+  const name = base.replace(FORMAT, '').replace(/\s+/g, ' ').replace(CONTROLS, '').replace(/ {2,}/g, ' ').trim();
   if (name === '' || name === '.' || name === '..') return 'file';
   if (utf8Length(name) <= MAX_BYTES) return name;
   // Too long: keep the extension (if it's a sensible one) and shorten the stem.

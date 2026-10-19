@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, readdir, rename, rm, stat as fsStat } from 'node:fs/promises';
+import { mkdir, readdir, rename, rm, stat as fsStat, statfs } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -32,6 +32,8 @@ export interface StorageDriver {
   list(): AsyncIterable<StoredObject>;
   /** A local file path for the object, when the driver has one (sharp reads files without buffering). */
   localPath?(key: string): string;
+  /** Free space for new objects, where the driver can tell (A12). */
+  freeBytes?(): Promise<number>;
   /** Removes half-written uploads older than `olderThan` (a crash mid-write), if the driver has any. */
   sweepTemps?(olderThan: Date): Promise<void>;
 }
@@ -83,6 +85,12 @@ export class DiskStorage implements StorageDriver {
     // Keys are ours, but a bad one must never reach the filesystem.
     if (!KEY.test(key)) throw new Error('Invalid storage key');
     return join(this.root, key);
+  }
+
+  async freeBytes() {
+    await mkdir(this.root, { recursive: true });
+    const s = await statfs(this.root);
+    return s.bavail * s.bsize;
   }
 
   localPath(key: string) {
@@ -137,7 +145,9 @@ export class DiskStorage implements StorageDriver {
     }
     for (const entry of entries) {
       if (!entry.isFile()) continue;
-      const key = relative(this.root, join(entry.parentPath, entry.name)).split(sep).join('/');
+      // parentPath is Node ≥ 20.12; `path` is its older name.
+      const parent = (entry as { parentPath?: string }).parentPath ?? (entry as unknown as { path: string }).path;
+      const key = relative(this.root, join(parent, entry.name)).split(sep).join('/');
       if (!KEY.test(key)) continue; // .tmp and anything else that isn't ours
       const s = await fsStat(join(this.root, key)).catch(() => null);
       if (s) yield { key, size: s.size, modifiedAt: s.mtime };

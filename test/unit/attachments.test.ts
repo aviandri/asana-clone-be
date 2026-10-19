@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { contentDisposition, sanitizeFilename } from '../../src/lib/filenames.js';
-import { isInline, sniffMimeType } from '../../src/lib/media.js';
+import { imagesInProgress, isInline, sniffMimeType, withImageSlot } from '../../src/lib/media.js';
 import { parseRange } from '../../src/routes/attachments.js';
 import { baseKey, derivedKey, newStorageKey } from '../../src/lib/storage.js';
 
@@ -29,6 +29,18 @@ describe('sanitizeFilename', () => {
   });
 });
 
+describe('sanitizeFilename (A12)', () => {
+  it('replaces lone surrogates and strips every invisible format character but ZWJ', () => {
+    expect(sanitizeFilename('a\uD800b.txt')).toBe('a\uFFFDb.txt');
+    expect(sanitizeFilename('a\uDC00.txt')).toBe('a\uFFFD.txt');
+    expect(sanitizeFilename('ok\uD83D\uDE00.txt'), 'a real pair stays').toBe('ok\uD83D\uDE00.txt');
+    for (const cf of ['\u00AD', '\u200B', '\u200C', '\u2060', '\u2064', '\uFEFF', '\u{E0041}', '\u{E007F}']) {
+      expect(sanitizeFilename(`re${cf}port.pdf`)).toBe('report.pdf');
+    }
+    expect(sanitizeFilename('a\u200Db.png')).toBe('a\u200Db.png');
+  });
+});
+
 describe('contentDisposition', () => {
   it('gives an ASCII fallback and the exact UTF-8 name', () => {
     expect(contentDisposition('inline', 'a.pdf')).toBe(`inline; filename="a.pdf"; filename*=UTF-8''a.pdf`);
@@ -51,6 +63,29 @@ describe('media', () => {
       expect(await sniffMimeType(Buffer.from('a,b'), `x.${ext}`)).toBe('text/plain');
     }
     expect(await sniffMimeType(Buffer.from('plain'), 'noext')).toBe('application/octet-stream');
+  });
+
+  it('calls m4a audio/mp4 (voice memos preview)', async () => {
+    const m4a = Buffer.concat([Buffer.from([0, 0, 0, 0x20]), Buffer.from('ftypM4A '), Buffer.alloc(20)]);
+    expect(await sniffMimeType(m4a, 'memo.m4a')).toBe('audio/mp4');
+    expect(isInline('audio/mp4')).toBe(true);
+  });
+
+  it('decodes at most 2 images at once', async () => {
+    let running = 0;
+    let peak = 0;
+    await Promise.all(
+      Array.from({ length: 6 }, () =>
+        withImageSlot(async () => {
+          running += 1;
+          peak = Math.max(peak, running);
+          await new Promise((r) => setTimeout(r, 20));
+          running -= 1;
+        }),
+      ),
+    );
+    expect(peak).toBe(2);
+    expect(imagesInProgress()).toBe(0);
   });
 
   it('inlines only the allowlist', () => {

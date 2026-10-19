@@ -528,7 +528,136 @@ describe('deleting', () => {
   });
 });
 
+describe('review fixes (#24)', () => {
+  it('limits concurrent uploads per user to 3, draft bytes to 1 GiB, and refuses when the disk is nearly full', async () => {
+    // Over a real socket: light-my-request would buffer a streamed body before the handler runs.
+    const { request } = await import('node:http');
+    await ctx.app.listen({ port: 0, host: '127.0.0.1' });
+    const port = (ctx.app.server.address() as { port: number }).port;
+    const boundary = '----held';
+    const held = [0, 1, 2].map(() => {
+      const req = request({
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: `/api/v1/tasks/${taskId}/attachments`,
+        headers: { cookie: alice.cookie, 'content-type': `multipart/form-data; boundary=${boundary}`, 'transfer-encoding': 'chunked' },
+      });
+      const status = new Promise<number>((resolve, reject) => {
+        req.on('response', (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        });
+        req.on('error', reject);
+      });
+      req.write(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="slow.txt"\r\n\r\nstart`);
+      return { req, status };
+    });
+    await new Promise((r) => setTimeout(r, 300)); // all three are streaming now
+    const fourth = await upload(alice, taskId, { filename: 'a.txt', data: 'a' });
+    expect(fourth.statusCode).toBe(429);
+    expect(fourth.json().error.code).toBe('RATE_LIMITED');
+    expect((await upload(bob, taskId, { filename: 'b.txt', data: 'b' })).statusCode, 'per user').toBe(201);
+    for (const h of held) h.req.end(`-end\r\n--${boundary}--\r\n`);
+    for (const h of held) expect(await h.status).toBe(201);
+    expect((await upload(alice, taskId, { filename: 'c.txt', data: 'c' })).statusCode, 'slots come back').toBe(201);
+
+    // 1 GiB of drafts already waiting (a row is enough: the quota counts sizes).
+    await prisma.attachment.create({
+      data: { workspaceId: await defaultWorkspaceId(), taskId, uploaderId: bob.user.id, kind: 'FILE', draft: true, name: 'big.bin', size: 1024 ** 3 },
+    });
+    const overQuota = await upload(bob, taskId, { filename: 'd.txt', data: 'd' }, '?draft=true');
+    expect(overQuota.statusCode).toBe(429);
+    const viaField = await upload(bob, taskId, { filename: 'd.txt', data: 'd' }, '', [{ name: 'draft', data: 'true' }]);
+    expect(viaField.statusCode, 'decided after the body, too').toBe(429);
+    expect((await upload(bob, taskId, { filename: 'e.txt', data: 'e' })).statusCode, 'posted files are not drafts').toBe(201);
+
+    const full = await buildApp({ config: { ...loadConfig(), STORAGE_MIN_FREE_BYTES: Number.MAX_SAFE_INTEGER }, prisma, logger: false });
+    try {
+      const body = multipart([{ name: 'file', filename: 'a.txt', data: 'a' }]);
+      const res = await full.inject({
+        method: 'POST',
+        url: `/api/v1/tasks/${taskId}/attachments`,
+        headers: { cookie: alice.cookie, ...body.headers },
+        payload: body.payload,
+      });
+      expect(res.statusCode).toBe(507);
+      expect(res.json().error.code).toBe('INSUFFICIENT_STORAGE');
+    } finally {
+      await full.close();
+    }
+  });
+
+  it('answers multipart shape limits with 400, not 413', async () => {
+    const fields = multipart([...Array.from({ length: 7 }, (_, i) => ({ name: `f${i}`, data: 'x' })), { name: 'file', filename: 'a.txt', data: 'a' }]);
+    const res = await ctx.app.inject({
+      method: 'POST',
+      url: `/api/v1/tasks/${taskId}/attachments`,
+      headers: { cookie: alice.cookie, ...fields.headers },
+      payload: fields.payload,
+    });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe('VALIDATION');
+  });
+
+  it('answers a missing file with a 404 envelope, and an empty file’s suffix range with 416', async () => {
+    const a = await uploaded(alice, { filename: 'gone.txt', data: 'bytes' });
+    await storage().delete((await keysOf(a.id)).key);
+    const res = await req(bob, 'GET', `/attachments/${a.id}/content`);
+    expect(res.statusCode).toBe(404);
+    expect(res.headers['content-type']).toMatch(/^application\/json/);
+    expect(res.headers['content-disposition']).toBeUndefined();
+    expect(res.json().error.code).toBe('NOT_FOUND');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+
+    const empty = await uploaded(alice, { filename: 'empty.txt', data: '' });
+    const suffix = await req(bob, 'GET', `/attachments/${empty.id}/content`, undefined, { range: 'bytes=-5' });
+    expect(suffix.statusCode).toBe(416);
+    expect(suffix.headers['content-range']).toBe('bytes */0');
+  });
+
+  it('removes a comment that was only the attachment being deleted', async () => {
+    const draft = await uploaded(bob, { filename: 'a.png', data: png }, '?draft=true');
+    const onlyFile = (await req(bob, 'POST', `/tasks/${taskId}/comments`, { attachmentIds: [draft.id] })).json();
+    const d2 = await uploaded(bob, { filename: 'b.txt', data: 'b' }, '?draft=true');
+    const withText = (await req(bob, 'POST', `/tasks/${taskId}/comments`, { body: 'see', attachmentIds: [d2.id] })).json();
+    expect((await req(bob, 'DELETE', `/attachments/${draft.id}`)).statusCode).toBe(204);
+    expect((await req(bob, 'DELETE', `/attachments/${d2.id}`)).statusCode).toBe(204);
+    const comments = (await req(bob, 'GET', `/tasks/${taskId}/stories`)).json().data.filter((st: { kind: string }) => st.kind === 'comment');
+    expect(comments.map((c: { id: string }) => c.id)).toEqual([withText.id]);
+    expect(onlyFile.id).not.toBe(withText.id);
+  });
+});
+
 describe('sweeper', () => {
+  it('keeps the files of a draft that a comment claims while the sweep runs', async () => {
+    const draft = await uploaded(bob, { filename: 'late.png', data: png }, '?draft=true');
+    await prisma.attachment.update({ where: { id: draft.id }, data: { createdAt: new Date(Date.now() - 25 * 3600_000) } });
+    const key = (await keysOf(draft.id)).key;
+    // The comment is posted between the sweep's read and its delete.
+    const racing = new Proxy(prisma, {
+      get(target, prop, receiver) {
+        if (prop !== 'attachment') return Reflect.get(target, prop, receiver);
+        return new Proxy(target.attachment, {
+          get(model, method, r) {
+            if (method !== 'findMany') return Reflect.get(model, method, r);
+            return async (args: object) => {
+              const rows = await model.findMany(args as never);
+              const res = await req(bob, 'POST', `/tasks/${taskId}/comments`, { body: 'just in time', attachmentIds: [draft.id] });
+              expect(res.statusCode).toBe(201);
+              return rows;
+            };
+          },
+        });
+      },
+    });
+    const result = await sweepAttachments(racing, storage(), new Date());
+    expect(result.drafts).toBe(0);
+    expect(await storage().stat(key), 'the posted file keeps its bytes').not.toBeNull();
+    expect(await storage().stat(derivedKey(key, 's'))).not.toBeNull();
+    expect((await req(alice, 'GET', `/attachments/${draft.id}/content`)).statusCode).toBe(200);
+  });
+
   it('removes day-old drafts and orphaned objects, and nothing recent or referenced', async () => {
     const draft = await uploaded(bob, { filename: 'old.png', data: png }, '?draft=true');
     const fresh = await uploaded(bob, { filename: 'new.txt', data: 'n' }, '?draft=true');

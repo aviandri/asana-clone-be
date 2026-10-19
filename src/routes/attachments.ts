@@ -91,6 +91,7 @@ export function parseRange(header: string | undefined, size: number, ifRange: st
   if (!match) return null;
   const [, from, to] = match;
   if (from === '' && to === '') return null;
+  if (size === 0) return 'unsatisfiable'; // no byte to point at
   if (from === '') {
     const suffix = Number(to);
     if (suffix === 0) return 'unsatisfiable';
@@ -147,6 +148,25 @@ export default async function attachmentRoutes(app: FastifyInstance) {
 
   // --- uploads -------------------------------------------------------------
 
+  /** A12: uploads in progress per user (≤ 3). */
+  const inFlight = new Map<string, number>();
+  const DRAFT_QUOTA = 1024 ** 3;
+
+  async function draftBytes(userId: string) {
+    const sum = await db.attachment.aggregate({ where: { uploaderId: userId, draft: true }, _sum: { size: true } });
+    return sum._sum.size ?? 0;
+  }
+
+  const draftQuotaError = () => new AppError('RATE_LIMITED', 'Too many unsent attachments: post or remove some first');
+
+  /** A12: refuse when this upload could leave less than STORAGE_MIN_FREE_BYTES free (507). */
+  async function assertRoom(expectedBytes: number) {
+    const free = await storage.freeBytes?.();
+    if (free !== undefined && free - expectedBytes < app.config.STORAGE_MIN_FREE_BYTES) {
+      throw new AppError('INSUFFICIENT_STORAGE', 'The server is out of space for attachments; try again later');
+    }
+  }
+
   /**
    * One part `file`; a draft (for the comment composer) is marked with `?draft=true` (A3), so a commenter's
    * non-draft upload is refused before any byte is read. A multipart `draft` field is also honoured.
@@ -158,10 +178,17 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     const commenterOnly = () => forbidden('Commenters can attach files to comments only');
     if (query.draft === false && !access.canEdit) throw commenterOnly();
     if (!req.isMultipart()) throw validation('Expected multipart/form-data with one part named "file"');
-    limiter.hit(req.user.id);
+    const userId = req.user.id;
+    if ((inFlight.get(userId) ?? 0) >= 3) throw new AppError('RATE_LIMITED', 'Too many uploads at once; wait for one to finish');
+    if (query.draft === true && (await draftBytes(userId)) >= DRAFT_QUOTA) throw draftQuotaError();
+    // The body's length is an upper bound for the file (all of it when the client sends none).
+    const declared = Number(req.headers['content-length']);
+    await assertRoom(Number.isFinite(declared) && declared > 0 ? Math.min(declared, maxBytes) : maxBytes);
+    limiter.hit(userId);
 
     let draftField: boolean | undefined;
     let stored: Awaited<ReturnType<typeof store>> | undefined;
+    inFlight.set(userId, (inFlight.get(userId) ?? 0) + 1);
     try {
       for await (const part of req.parts()) {
         if (part.type === 'field') {
@@ -179,6 +206,7 @@ export default async function attachmentRoutes(app: FastifyInstance) {
       if (!stored) throw validation('Send exactly one part named "file"', [{ path: ['file'], message: 'Required' }]);
       const draft = query.draft ?? draftField ?? false;
       if (!draft && !access.canEdit) throw commenterOnly();
+      if (draft && (await draftBytes(userId)) + stored.file.size > DRAFT_QUOTA) throw draftQuotaError();
 
       const file = stored.file;
       const attachment = await db.$transaction(async (tx) => {
@@ -198,6 +226,10 @@ export default async function attachmentRoutes(app: FastifyInstance) {
       // The task was deleted while the file streamed in.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') throw notFound('Task');
       throw err;
+    } finally {
+      const left = (inFlight.get(userId) ?? 1) - 1;
+      if (left > 0) inFlight.set(userId, left);
+      else inFlight.delete(userId);
     }
   });
 
@@ -215,6 +247,11 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     const { attachment } = await findVisibleAttachment(db, req.user, id);
     const { storageKey, sha256, mimeType, size, name } = attachment;
     if (attachment.kind !== 'FILE' || !storageKey || !sha256 || !mimeType || size === null || !name) {
+      throw notFound('Attachment');
+    }
+    // Before any header: a missing object is a plain 404 envelope, never a half-set byte response.
+    if (!(await storage.stat(storageKey))) {
+      req.log.error({ attachmentId: id }, 'Attachment file is missing from storage');
       throw notFound('Attachment');
     }
     const etag = `"${sha256}"`;
@@ -268,6 +305,10 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     const taskLevel = !attachment.draft && attachment.commentId === null;
     await db.$transaction(async (tx) => {
       await tx.attachment.delete({ where: { id } });
+      // A comment that was only this attachment is gone with it (clients treat it as deleted).
+      if (attachment.commentId) {
+        await tx.comment.deleteMany({ where: { id: attachment.commentId, body: '', attachments: { none: {} } } });
+      }
       if (taskLevel) {
         const name = attachment.kind === 'FILE' ? attachment.name : (attachment.title ?? attachment.url);
         await recordActivity(tx, attachment.taskId, req.user.id, 'ATTACHMENT_REMOVED', { kind: attachment.kind, name });
