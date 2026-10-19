@@ -39,7 +39,9 @@ const MAX_REDIRECTS = 3;
 const MAX_HTML_BYTES = 1024 * 1024;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-export class BlockedError extends Error {}
+export class BlockedError extends Error {
+  override name = 'BlockedError';
+}
 
 type Response = { status: number; headers: http.IncomingHttpHeaders; body: Buffer; truncated: boolean };
 
@@ -165,7 +167,7 @@ export function cleanText(raw: string | undefined, max: number): string | null {
   if (!raw) return null;
   const text = decodeEntities(raw.replace(/<[^>]*>/g, ' '))
     .replace(/\s+/g, ' ')
-    .replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩؜﻿]/g, '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200B-\u200F\u202A-\u202E\u2066-\u2069\u061C\uFEFF]/g, '')
     .trim();
   if (!text) return null;
   const chars = [...text];
@@ -181,6 +183,9 @@ function attributes(tag: string): Record<string, string> {
   return out;
 }
 
+/** One `<name …>` tag; a `>` inside a quoted attribute value doesn't end it. */
+const TAG = (name: string) => new RegExp(`<${name}\\b(?:[^>"']|"[^"]*"|'[^']*')*>`, 'gi');
+
 export type PageMeta = {
   title: string | null;
   description: string | null;
@@ -192,14 +197,14 @@ export type PageMeta = {
 /** og:*, twitter:*, <title>, <meta name=description> and <link rel=icon>, resolved against `base`. */
 export function parsePage(html: string, base: URL): PageMeta {
   const meta = new Map<string, string>();
-  for (const [tag] of html.matchAll(/<meta\b[^>]*>/gi)) {
+  for (const [tag] of html.matchAll(TAG('meta'))) {
     const a = attributes(tag);
     const key = (a.property ?? a.name ?? '').toLowerCase();
     if (key && a.content !== undefined && !meta.has(key)) meta.set(key, a.content);
   }
   const titleTag = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1];
   let icon: string | undefined;
-  for (const [tag] of html.matchAll(/<link\b[^>]*>/gi)) {
+  for (const [tag] of html.matchAll(TAG('link'))) {
     const a = attributes(tag);
     const rel = (a.rel ?? '').toLowerCase().split(/\s+/);
     if (a.href && (rel.includes('icon') || rel.includes('apple-touch-icon'))) {
@@ -280,7 +285,7 @@ export async function reencode(bytes: Buffer, box: number): Promise<Buffer | nul
   const type = await fileTypeFromBuffer(bytes);
   let input: Buffer | null = null;
   if (type && RASTER.has(type.mime)) input = bytes;
-  else if (type?.mime === 'image/x-icon' || type?.mime === 'image/vnd.microsoft.icon') input = pngFromIco(bytes);
+  else if (type?.mime === 'image/x-icon') input = pngFromIco(bytes);
   if (!input) return null;
   try {
     return await sharp(input, { limitInputPixels: 50_000_000, failOn: 'error' })

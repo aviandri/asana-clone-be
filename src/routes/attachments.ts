@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import multipart, { type MultipartFile } from '@fastify/multipart';
 import { Prisma } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { AppError, forbidden, notFound, validation } from '../errors.js';
@@ -16,10 +17,31 @@ import { recordActivity } from '../lib/events.js';
 import { contentDisposition, sanitizeFilename } from '../lib/filenames.js';
 import { contentType, isInline, isRasterImage, processImage, sniffMimeType, SNIFF_BYTES } from '../lib/media.js';
 import { derivedKey, newStorageKey, type StorageDriver } from '../lib/storage.js';
+import { fetchPreview, providerFor, type Preview } from '../lib/link-preview.js';
 import { findTaskWithAccess } from '../lib/tasks.js';
 import { idParams, parse, queryBool } from '../lib/validate.js';
 
 const UploadQuery = z.object({ draft: queryBool.optional() });
+
+/** SPEC §13: an absolute http(s) URL, ≤ 2048 chars, without credentials. */
+const linkUrl = z
+  .string()
+  .trim()
+  .max(2048)
+  .refine((raw) => {
+    try {
+      const url = new URL(raw);
+      return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password && url.hostname !== '';
+    } catch {
+      return false;
+    }
+  }, 'Expected an absolute http(s) URL without credentials');
+
+const NewLink = z.object({
+  url: linkUrl,
+  title: z.string().trim().max(300).optional().transform((t) => t || undefined),
+  draft: z.boolean().optional(),
+});
 const ContentQuery = z.object({ download: z.enum(['1', 'true']).optional() });
 const ThumbnailQuery = z.object({ size: z.enum(['small', 'large']).default('small') });
 
@@ -201,6 +223,119 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     }
   });
 
+  /** Stores a preview's re-encoded icon and image; returns their keys (null where there's none). */
+  async function storePreviewImages(preview: Preview) {
+    const keys = { iconKey: null as string | null, imageKey: null as string | null };
+    try {
+      if (preview.icon) {
+        keys.iconKey = newStorageKey();
+        await storage.put(keys.iconKey, Readable.from(preview.icon));
+      }
+      if (preview.image) {
+        keys.imageKey = newStorageKey();
+        await storage.put(keys.imageKey, Readable.from(preview.image));
+      }
+    } catch (err) {
+      await removeObjects(storage, [keys.iconKey, keys.imageKey].filter((k): k is string => k !== null), app.log);
+      throw err;
+    }
+    return keys;
+  }
+
+  async function preview(url: string): Promise<Preview> {
+    if (!app.config.LINK_PREVIEW_ENABLED) {
+      return { status: 'FAILED', title: null, description: null, siteName: null, provider: providerFor(new URL(url)), icon: null, image: null };
+    }
+    const result = await fetchPreview(url, app.fetchPolicy);
+    if (result.status === 'FAILED') app.log.info({ reason: result.reason }, 'Link preview failed');
+    return result;
+  }
+
+  /**
+   * A link (SPEC §13): the preview is fetched synchronously within 6 s; a failure still creates the link,
+   * with previewStatus FAILED. Drafts and the commenter rule work as for files.
+   */
+  app.post('/tasks/:id/attachments/link', async (req, reply) => {
+    const { id } = parse(idParams, req.params);
+    const body = parse(NewLink, req.body);
+    const { task, access } = await findTaskWithAccess(db, req.user, id);
+    const draft = body.draft ?? false;
+    if (!draft && !access.canEdit) throw forbidden('Commenters can attach links to comments only');
+    limiter.hit(req.user.id);
+
+    const fetched = await preview(body.url);
+    const images = await storePreviewImages(fetched);
+    try {
+      const attachment = await db.$transaction(async (tx) => {
+        const created = await tx.attachment.create({
+          data: {
+            workspaceId: task.workspaceId,
+            taskId: task.id,
+            uploaderId: req.user.id,
+            kind: 'LINK',
+            draft,
+            url: body.url,
+            title: body.title ?? fetched.title,
+            titleFromUser: body.title !== undefined,
+            description: fetched.description,
+            siteName: fetched.siteName,
+            provider: fetched.provider,
+            previewStatus: fetched.status,
+            ...images,
+          },
+          include: attachmentInclude,
+        });
+        if (!draft) {
+          await recordActivity(tx, task.id, req.user.id, 'ATTACHMENT_ADDED', {
+            attachmentId: created.id,
+            kind: 'LINK',
+            name: created.title ?? body.url,
+          });
+          await tx.task.update({ where: { id: task.id }, data: { updatedAt: new Date() } });
+        }
+        return created;
+      });
+      return reply.status(201).send(toAttachment(attachment));
+    } catch (err) {
+      await removeObjects(storage, [images.iconKey, images.imageKey].filter((k): k is string => k !== null), app.log);
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') throw notFound('Task');
+      throw err;
+    }
+  });
+
+  /** Re-fetches a LINK's preview: its uploader or anyone who can edit the task. A typed title is kept. */
+  app.post('/attachments/:id/refresh-preview', async (req) => {
+    const { id } = parse(idParams, req.params);
+    const { attachment, access } = await findVisibleAttachment(db, req.user, id);
+    if (attachment.kind !== 'LINK' || !attachment.url) throw validation('Only links have a preview');
+    if (attachment.uploaderId !== req.user.id && !access.canEdit) throw forbidden('Commenters can only refresh their own links');
+    limiter.hit(req.user.id);
+
+    const fetched = await preview(attachment.url);
+    const images = await storePreviewImages(fetched);
+    let updated;
+    try {
+      updated = await db.attachment.update({
+        where: { id },
+        data: {
+          title: attachment.titleFromUser ? attachment.title : fetched.title,
+          description: fetched.description,
+          siteName: fetched.siteName,
+          provider: fetched.provider,
+          previewStatus: fetched.status,
+          ...images,
+        },
+        include: attachmentInclude,
+      });
+    } catch (err) {
+      await removeObjects(storage, [images.iconKey, images.imageKey].filter((k): k is string => k !== null), app.log);
+      throw err;
+    }
+    // The previous images, now unreferenced (after the commit, like every file removal).
+    await removeObjects(storage, [attachment.iconKey, attachment.imageKey].filter((k): k is string => k !== null), req.log);
+    return toAttachment(updated);
+  });
+
   // --- reads (ID-addressed: X-Workspace-Id plays no part, so <img>/<video> work) ---
 
   app.get('/attachments/:id', async (req) => {
@@ -256,6 +391,27 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     if (notModified(req, etag)) return reply.status(304).send();
     return reply.header('Content-Length', object.size).send(storage.get(key));
   });
+
+  /** A LINK's server-cached favicon / og:image (SPEC §13): clients never contact third-party hosts. */
+  for (const [path, field] of [
+    ['icon', 'iconKey'],
+    ['image', 'imageKey'],
+  ] as const) {
+    app.get(`/attachments/:id/${path}`, servedBytes, async (req, reply) => {
+      const { id } = parse(idParams, req.params);
+      const { attachment } = await findVisibleAttachment(db, req.user, id);
+      const key = attachment[field];
+      if (attachment.kind !== 'LINK' || !key) throw notFound(path === 'icon' ? 'Icon' : 'Image');
+      const object = await storage.stat(key);
+      if (!object) throw notFound(path === 'icon' ? 'Icon' : 'Image');
+      // Each refresh stores under a new key, so the key's hash is a strong validator (the key itself stays private).
+      const etag = `"${createHash('sha256').update(key).digest('hex').slice(0, 32)}"`;
+      servingHeaders(reply, etag);
+      reply.header('Content-Type', 'image/webp').header('Content-Disposition', 'inline');
+      if (notModified(req, etag)) return reply.status(304).send();
+      return reply.header('Content-Length', object.size).send(storage.get(key));
+    });
+  }
 
   // --- delete ----------------------------------------------------------------
 

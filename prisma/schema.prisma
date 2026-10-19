@@ -355,6 +355,8 @@ model Attachment {
   siteName      String?
   provider      String?
   previewStatus LinkPreviewStatus?
+  /// The title was typed by the user: a refreshed preview keeps it.
+  titleFromUser Boolean            @default(false)
   iconKey       String?            @unique
   imageKey      String?            @unique
 

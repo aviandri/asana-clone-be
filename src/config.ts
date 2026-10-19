@@ -10,6 +10,12 @@ function isValidTimeZone(tz: string) {
   }
 }
 
+const envBool = (fallback: boolean) =>
+  z
+    .enum(['true', 'false', '1', '0'])
+    .default(fallback ? 'true' : 'false')
+    .transform((v) => v === 'true' || v === '1');
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DATABASE_URL: z.string().min(1),
@@ -39,6 +45,13 @@ const EnvSchema = z.object({
    * 100 MB upload through at ~0.9 Mbit/s. nginx's timeouts are per read/write, so this is the only total.
    */
   REQUEST_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(900_000),
+  /** Fetch link previews (SPEC §13). Off: links are created with previewStatus FAILED; cards still work. */
+  LINK_PREVIEW_ENABLED: envBool(true),
+  /** TESTS ONLY: let the preview fetcher reach private addresses and any port. Refused in production. */
+  LINK_PREVIEW_ALLOW_PRIVATE: envBool(false),
+}).refine((c) => !(c.NODE_ENV === 'production' && c.LINK_PREVIEW_ALLOW_PRIVATE), {
+  message: 'must not be set in production (it lets link previews reach the internal network)',
+  path: ['LINK_PREVIEW_ALLOW_PRIVATE'],
 });
 
 export type Config = z.infer<typeof EnvSchema>;
