@@ -130,13 +130,19 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export async function sweepAttachments(db: PrismaClient, storage: StorageDriver, now = new Date(), log?: FastifyBaseLogger) {
   const cutoff = new Date(now.getTime() - DAY_MS);
 
-  const drafts = await db.attachment.findMany({
+  const candidates = await db.attachment.findMany({
     where: { draft: true, createdAt: { lt: cutoff } },
     select: { id: true, storageKey: true, hasThumbnail: true, iconKey: true, imageKey: true },
   });
-  if (drafts.length > 0) {
-    await db.attachment.deleteMany({ where: { id: { in: drafts.map((d) => d.id) }, draft: true } });
-    await removeObjects(storage, drafts.flatMap(objectKeys), log);
+  // One row at a time, and only while it's STILL an old draft: a comment posted meanwhile claims it (it
+  // stops being a draft), and its files must stay. Files go only for rows this sweep really deleted.
+  let drafts = 0;
+  for (const row of candidates) {
+    const { count } = await db.attachment.deleteMany({ where: { id: row.id, draft: true, createdAt: { lt: cutoff } } });
+    if (count === 1) {
+      drafts += 1;
+      await removeObjects(storage, objectKeys(row), log);
+    }
   }
 
   // Orphans: collect old objects, then ask the DB which of their base keys still have a row.
@@ -159,5 +165,5 @@ export async function sweepAttachments(db: PrismaClient, storage: StorageDriver,
   }
 
   await storage.sweepTemps?.(cutoff);
-  return { drafts: drafts.length, orphans };
+  return { drafts, orphans };
 }

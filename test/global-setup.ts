@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
 
 // Bring asana_test up to the latest migration once per `vitest run`.
 export default function setup() {
@@ -11,4 +12,9 @@ export default function setup() {
     stdio: 'pipe',
     env: { ...process.env, DATABASE_URL: url },
   });
+  // Teardown: this run's attachment directory only (vitest.config.ts names it per run).
+  return () => {
+    const dir = process.env.TEST_STORAGE_DIR;
+    if (dir && /asana-be-test-attachments-\d+-\d+$/.test(dir)) rmSync(dir, { recursive: true, force: true });
+  };
 }

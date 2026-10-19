@@ -36,6 +36,7 @@ export type AppOptions = {
     | 'STORAGE_DIR'
     | 'MAX_UPLOAD_BYTES'
     | 'UPLOAD_RATE_LIMIT_MAX'
+    | 'STORAGE_MIN_FREE_BYTES'
   > &
     Partial<Pick<Config, 'REQUEST_TIMEOUT_MS' | 'LINK_PREVIEW_ENABLED' | 'LINK_PREVIEW_ALLOW_PRIVATE'>>;
   /** The link-preview fetcher's network policy (tests); default from LINK_PREVIEW_ALLOW_PRIVATE. */
@@ -49,6 +50,8 @@ export type AppOptions = {
 };
 
 const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+/** The first sweep, shortly after start: a service redeployed more often than hourly still sweeps. */
+const FIRST_SWEEP_MS = 60 * 1000;
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -114,17 +117,25 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   if (opts.sweeper ?? opts.config.NODE_ENV !== 'test') {
     let timer: NodeJS.Timeout | undefined;
-    const sweep = () =>
-      sweepAttachments(app.db, app.storage, new Date(), app.log)
-        .then((r) => {
-          if (r.drafts || r.orphans) app.log.info(r, 'Attachment sweep');
-        })
-        .catch((err: unknown) => app.log.error({ err }, 'Attachment sweep failed'));
-    app.addHook('onReady', async () => {
-      timer = setInterval(sweep, SWEEP_INTERVAL_MS);
+    let closed = false;
+    // Chained, never overlapping: the next sweep is scheduled when this one has finished.
+    const schedule = (delay: number) => {
+      if (closed) return;
+      timer = setTimeout(() => {
+        sweepAttachments(app.db, app.storage, new Date(), app.log)
+          .then((r) => {
+            if (r.drafts || r.orphans) app.log.info(r, 'Attachment sweep');
+          })
+          .catch((err: unknown) => app.log.error({ err }, 'Attachment sweep failed'))
+          .finally(() => schedule(SWEEP_INTERVAL_MS));
+      }, delay);
       timer.unref();
+    };
+    app.addHook('onReady', async () => schedule(FIRST_SWEEP_MS));
+    app.addHook('onClose', async () => {
+      closed = true;
+      clearTimeout(timer);
     });
-    app.addHook('onClose', async () => clearInterval(timer));
   }
 
   return app;

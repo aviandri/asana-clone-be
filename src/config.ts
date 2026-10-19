@@ -40,6 +40,8 @@ const EnvSchema = z.object({
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(104_857_600),
   /** Uploads (files and links) per user per 10 minutes. */
   UPLOAD_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+  /** Uploads are refused (507) when they could leave less than this free on STORAGE_DIR (A12: 2 GiB). */
+  STORAGE_MIN_FREE_BYTES: z.coerce.number().int().nonnegative().default(2 * 1024 ** 3),
   /**
    * The longest a whole request may take, in ms (Fastify's requestTimeout; 0 = none). 15 minutes lets a
    * 100 MB upload through at ~0.9 Mbit/s. nginx's timeouts are per read/write, so this is the only total.
