@@ -28,7 +28,22 @@ describe('seed (SPEC §7)', () => {
     expect(await prisma.section.count({ where: { project: { workspaceId: mekari.id } } })).toBe(9);
     expect(await prisma.task.count({ where: { workspaceId: mekari.id, parentId: { not: null } } })).toBe(5);
     expect(await prisma.task.count({ where: { completed: true } })).toBeGreaterThan(3);
-    expect(await prisma.comment.count({ where: { task: { workspaceId: mekari.id } } })).toBe(6);
+
+    // SPEC §13: a PNG, a PDF, a text file, a READY link and a comment image, in each workspace.
+    const attachments = await prisma.attachment.findMany({ where: { workspaceId: mekari.id }, orderBy: { createdAt: 'asc' } });
+    expect(attachments.map((a) => [a.kind, a.mimeType ?? a.previewStatus, a.commentId !== null, a.hasThumbnail])).toEqual([
+      ['FILE', 'image/png', false, true],
+      ['FILE', 'application/pdf', false, false],
+      ['FILE', 'text/plain', false, false],
+      ['LINK', 'READY', false, false],
+      ['FILE', 'image/png', true, true],
+    ]);
+    expect(attachments.some((a) => a.draft)).toBe(false);
+    for (const a of attachments.filter((x) => x.storageKey)) {
+      expect(await ctx.app.storage.stat(a.storageKey!), a.name ?? '').not.toBeNull();
+    }
+    expect(await prisma.attachment.count({ where: { workspace: { name: 'Acme Pilot' } } })).toBe(5);
+    expect(await prisma.comment.count({ where: { task: { workspaceId: mekari.id } } })).toBe(7); // 6 + the one with an image
     expect(await prisma.notification.count({ where: { type: 'MENTIONED' } })).toBe(2);
     expect(new Set((await prisma.task.findMany({ where: { workspaceId: mekari.id }, select: { assigneeId: true } })).map((t) => t.assigneeId)).size).toBe(4); // 3 users + unassigned
 

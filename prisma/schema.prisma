@@ -49,6 +49,19 @@ enum ActivityType {
   RENAMED
   PRIORITY_CHANGED
   DESCRIPTION_CHANGED
+  ATTACHMENT_ADDED
+  ATTACHMENT_REMOVED
+}
+
+enum AttachmentKind {
+  FILE
+  LINK
+}
+
+enum LinkPreviewStatus {
+  PENDING
+  READY
+  FAILED
 }
 
 enum NotificationType {
@@ -102,6 +115,7 @@ model Workspace {
   tasks         Task[]
   goals         Goal[]
   notifications Notification[]
+  attachments   Attachment[]
 }
 
 model WorkspaceMember {
@@ -146,6 +160,7 @@ model User {
   ownedGoals           Goal[]          @relation("GoalOwner")
   ownedKeyResults      KeyResult[]     @relation("KeyResultOwner")
   goalUpdates          GoalUpdate[]
+  attachments          Attachment[]
 }
 
 model Invite {
@@ -161,11 +176,11 @@ model Invite {
 
   invitedBy User      @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // Plus a partial unique index on (workspaceId, email) WHERE acceptedAt IS NULL, in raw SQL
+  // (migration 20261018120000_invite_pending_unique): one pending invite per workspace and email.
 
   @@index([email])
   @@index([workspaceId])
-  // Plus a partial unique index on (workspaceId, email) WHERE acceptedAt IS NULL, in raw SQL
-  // (migration 20261018120000_invite_pending_unique): one pending invite per workspace and email.
 }
 
 model Team {
@@ -277,6 +292,7 @@ model Task {
   comments      Comment[]
   activities    Activity[]
   notifications Notification[]
+  attachments   Attachment[]
 
   @@index([projectId, sectionId, position])
   @@index([parentId])
@@ -303,10 +319,53 @@ model Comment {
   createdAt DateTime  @default(now())
   editedAt  DateTime?
 
-  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  task        Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author      User         @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  attachments Attachment[]
 
   @@index([taskId, createdAt])
+}
+
+/// SPEC §13. Files live in the StorageDriver under `storageKey` (thumbnails at derived keys); rows
+/// are deleted first and their files after the commit. Drafts belong to a comment being written.
+model Attachment {
+  id          String         @id @default(uuid()) @db.Uuid
+  workspaceId String         @db.Uuid
+  taskId      String         @db.Uuid
+  commentId   String?        @db.Uuid
+  uploaderId  String         @db.Uuid
+  kind        AttachmentKind
+  draft       Boolean        @default(false)
+  createdAt   DateTime       @default(now())
+
+  // FILE
+  name         String?
+  mimeType     String?
+  size         Int?
+  storageKey   String? @unique
+  sha256       String?
+  width        Int?
+  height       Int?
+  hasThumbnail Boolean @default(false)
+
+  // LINK
+  url           String?
+  title         String?
+  description   String?
+  siteName      String?
+  provider      String?
+  previewStatus LinkPreviewStatus?
+  iconKey       String?            @unique
+  imageKey      String?            @unique
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  task      Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  comment   Comment?  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  uploader  User      @relation(fields: [uploaderId], references: [id], onDelete: Restrict)
+
+  @@index([taskId, createdAt])
+  @@index([commentId])
+  @@index([draft, createdAt])
 }
 
 model Activity {

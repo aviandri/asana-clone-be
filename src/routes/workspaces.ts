@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AppError, conflict, forbidden, notFound, validation } from '../errors.js';
 import { toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { hexColor, idParams, parse } from '../lib/validate.js';
+import { removeObjects, storageKeysOf } from '../lib/attachments.js';
 import {
   assertNotLastAdmin,
   deleteWorkspace,
@@ -144,7 +145,9 @@ export default async function workspaceRoutes(app: FastifyInstance) {
     if (confirmName !== workspace.name) {
       throw validation('Type the workspace name to confirm', [{ path: ['confirmName'], message: 'Does not match the workspace name' }]);
     }
+    const files = await storageKeysOf(db, { workspaceId: id });
     await db.$transaction((tx) => deleteWorkspace(tx, id), { timeout: 60_000 });
+    await removeObjects(app.storage, files, req.log);
     return reply.status(204).send();
   });
 

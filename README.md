@@ -49,6 +49,11 @@ src/lib/goal-progress.ts  goal progress maths + cycle/depth checks (SPEC §10), 
 src/lib/time.ts     APP_TIMEZONE-aware dates, weeks and goal periods
 src/lib/csv.ts      RFC 4180 CSV with formula-injection escaping and a UTF-8 BOM
 src/routes/reports.ts  project report, overview, workload, CSV export (SPEC §11)
+src/routes/attachments.ts  uploads, serving (Range/ETag, sandbox headers), delete (SPEC §13)
+src/lib/storage.ts  StorageDriver + the disk driver (temp file + rename, random keys)
+src/lib/attachments.ts  Attachment shape, visibility, post-commit file removal, the hourly sweeper
+src/lib/media.ts    magic-byte type sniffing, the inline allowlist, sharp dimensions/thumbnails
+src/lib/filenames.ts  filename sanitising, RFC 6266 Content-Disposition
 src/routes/*        one file per resource
 src/scripts/*       CLI entrypoints, compiled to dist/scripts
 prisma/             schema (full v1 data model) + migrations
@@ -58,4 +63,6 @@ test/               integration tests (one worker, files run in sequence)
 ## Security notes and known v1 limitations
 
 - `POST /auth/login` and `/auth/accept-invite` are rate-limited per IP (`AUTH_RATE_LIMIT_MAX`, default 10/min). Over the limit they return `429` with code `RATE_LIMITED`. `trustProxy` is on, so client IPs are correct behind nginx.
+- **Attachments are user content on our own origin** (SPEC §13). Types are sniffed from bytes (the client's Content-Type is ignored), and only an allowlist (raster images, PDF, audio/video, plain text) is served `inline`; everything else (HTML, SVG, XML, …) is `attachment`. Every byte response carries `X-Content-Type-Options: nosniff`, `Content-Security-Policy: sandbox; default-src 'none'; img-src 'self'; media-src 'self'` and `Cross-Origin-Resource-Policy: same-origin`. Filenames are sanitised (bidi/format controls stripped) and never used for storage paths. Files are removed after the DB commit that deletes their rows; an hourly in-process sweeper removes drafts older than 24 h and unreferenced objects older than 24 h. Uploads are limited per user (`UPLOAD_RATE_LIMIT_MAX` per 10 min) and per file (`MAX_UPLOAD_BYTES`); `REQUEST_TIMEOUT_MS` (15 min) caps any request in total, since nginx streams bodies through unbuffered and only times out per read/write.
+- `npm run seed -- --reset` empties the database but not `STORAGE_DIR`: the sweeper deletes the now-unreferenced files a day later (or empty the directory by hand).
 - Sessions are stateless JWTs. **Changing a password or role doesn't revoke existing sessions** until they expire (7 days). Deactivating a user does take effect immediately, because every request reloads the user.

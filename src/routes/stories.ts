@@ -6,16 +6,40 @@ import { follow, notify } from '../lib/events.js';
 import { extractMentionIds } from '../lib/mentions.js';
 import { toUserSummary, userSummarySelect, type UserSummaryRow } from '../lib/serialize.js';
 import { findTaskWithAccess, taskAccess } from '../lib/tasks.js';
-import { idParams, parse } from '../lib/validate.js';
+import { idParams, parse, uuid } from '../lib/validate.js';
+import {
+  attachmentInclude,
+  removeObjects,
+  storageKeysOf,
+  toAttachment,
+  type AttachmentRow,
+} from '../lib/attachments.js';
 
-const CommentBody = z.object({ body: z.string().trim().min(1).max(20_000) });
+const body = z.string().trim().max(20_000);
+const emptyBody = { path: ['body'], message: 'A comment needs text or an attachment' };
 
-function toCommentStory(c: Comment & { author: UserSummaryRow }) {
+/** SPEC §13: up to 20 of the caller's drafts on this task; then the body may be empty. */
+const NewComment = z
+  .object({ body: body.default(''), attachmentIds: z.array(uuid).max(20).optional() })
+  .transform((c) => ({ body: c.body, attachmentIds: [...new Set(c.attachmentIds ?? [])] }))
+  .refine((c) => c.body.length > 0 || c.attachmentIds.length > 0, emptyBody);
+
+const EditedComment = z.object({ body });
+
+const commentInclude = {
+  author: { select: userSummarySelect },
+  attachments: { include: attachmentInclude, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] },
+} satisfies Prisma.CommentInclude;
+
+type CommentRow = Comment & { author: UserSummaryRow; attachments: AttachmentRow[] };
+
+function toCommentStory(c: CommentRow) {
   return {
     kind: 'comment' as const,
     id: c.id,
     author: toUserSummary(c.author),
     body: c.body,
+    attachments: c.attachments.map(toAttachment),
     createdAt: c.createdAt.toISOString(),
     editedAt: c.editedAt?.toISOString() ?? null,
   };
@@ -57,7 +81,7 @@ export default async function storyRoutes(app: FastifyInstance) {
     const { id } = parse(idParams, req.params);
     await findTaskWithAccess(db, req.user, id);
     const [comments, activities] = await Promise.all([
-      db.comment.findMany({ where: { taskId: id }, include: { author: { select: userSummarySelect } } }),
+      db.comment.findMany({ where: { taskId: id }, include: commentInclude }),
       db.activity.findMany({ where: { taskId: id }, include: { actor: { select: userSummarySelect } } }),
     ]);
     const stories = [
@@ -83,16 +107,26 @@ export default async function storyRoutes(app: FastifyInstance) {
   // Commenting only needs visibility, so COMMENTERs can comment.
   app.post('/tasks/:id/comments', async (req, reply) => {
     const { id } = parse(idParams, req.params);
-    const { body } = parse(CommentBody, req.body);
+    const { body, attachmentIds } = parse(NewComment, req.body);
     const { task } = await findTaskWithAccess(db, req.user, id);
     const actorId = req.user.id;
     const mentioned = await mentionRecipients(task, body);
 
     const comment = await db.$transaction(async (tx: Prisma.TransactionClient) => {
-      const created = await tx.comment.create({
-        data: { taskId: id, authorId: actorId, body },
-        include: { author: { select: userSummarySelect } },
-      });
+      const { id: commentId } = await tx.comment.create({ data: { taskId: id, authorId: actorId, body } });
+      if (attachmentIds.length > 0) {
+        // Each must still be the caller's draft on this task; claimed atomically, so two comments can't share one.
+        const claimed = await tx.attachment.updateMany({
+          where: { id: { in: attachmentIds }, draft: true, uploaderId: actorId, taskId: id },
+          data: { draft: false, commentId },
+        });
+        if (claimed.count !== attachmentIds.length) {
+          throw validation('Attachments must be your drafts on this task', [
+            { path: ['attachmentIds'], message: 'Not a draft you uploaded to this task' },
+          ]);
+        }
+      }
+      const created = await tx.comment.findUniqueOrThrow({ where: { id: commentId }, include: commentInclude });
       await follow(tx, id, [actorId]);
       // Mentioned users get MENTIONED instead of COMMENTED, so each person gets one notification.
       const followers = await tx.taskFollower.findMany({ where: { taskId: id }, select: { userId: true } });
@@ -105,12 +139,16 @@ export default async function storyRoutes(app: FastifyInstance) {
 
   app.patch('/comments/:id', async (req) => {
     const { id } = parse(idParams, req.params);
-    const { body } = parse(CommentBody, req.body);
+    const { body } = parse(EditedComment, req.body);
     const existing = await findComment(id);
     await taskAccess(db, req.user, existing.task).catch(() => {
       throw notFound('Comment');
     });
     if (existing.authorId !== req.user.id) throw forbidden('Only the author can edit a comment');
+    // Empty is fine only while the comment still has attachments (A9); edits never change them.
+    if (body.length === 0 && (await db.attachment.count({ where: { commentId: id } })) === 0) {
+      throw validation('Invalid request', [emptyBody]);
+    }
 
     // Only people newly mentioned by the edit are notified.
     const newlyMentioned = await mentionRecipients(existing.task, body, extractMentionIds(existing.body));
@@ -118,7 +156,7 @@ export default async function storyRoutes(app: FastifyInstance) {
       const updated = await tx.comment.update({
         where: { id },
         data: { body, editedAt: new Date() },
-        include: { author: { select: userSummarySelect } },
+        include: commentInclude,
       });
       await notify(tx, 'MENTIONED', req.user.id, existing.task, newlyMentioned);
       return updated;
@@ -135,7 +173,9 @@ export default async function storyRoutes(app: FastifyInstance) {
     if (existing.authorId !== req.user.id && member.role !== 'ADMIN') {
       throw forbidden('Only the author or an admin can delete a comment');
     }
-    await db.comment.delete({ where: { id } });
+    const files = await storageKeysOf(db, { commentId: id });
+    await db.comment.delete({ where: { id } }); // its attachments cascade
+    await removeObjects(app.storage, files, req.log);
     return reply.status(204).send();
   });
 }

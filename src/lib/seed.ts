@@ -4,6 +4,8 @@ import { projectAccess } from './access.js';
 import { hashPassword } from './password.js';
 import { SESSION_COOKIE } from '../plugins/auth.js';
 import { currentPeriods } from './time.js';
+import { removeObjects, storageKeysOf } from './attachments.js';
+import { seedAttachments } from './seed-attachments.js';
 import { deleteWorkspace, WORKSPACE_HEADER } from './workspaces.js';
 
 /**
@@ -238,6 +240,7 @@ export async function seed(app: FastifyInstance) {
 
   let taskCount = 0;
   const projectIds: Record<string, string> = {};
+  const taskIdsByTitle: Record<string, string> = {};
   for (const p of PROJECTS) {
     const project = await call<{ id: string; sections: { id: string }[] }>(p.owner, 'POST', '/projects', {
       teamId: teams[p.team],
@@ -263,6 +266,7 @@ export async function seed(app: FastifyInstance) {
         priority: t.priority,
       });
       taskCount += 1;
+      taskIdsByTitle[t.title] = task.id;
       for (const s of t.subtasks ?? []) {
         const sub = await call(p.owner, 'POST', '/tasks', {
           title: s.title,
@@ -278,6 +282,14 @@ export async function seed(app: FastifyInstance) {
       if (t.done) await call(t.assignee ?? p.owner, 'PATCH', `/tasks/${task.id}`, { completed: true });
     }
   }
+
+  // SPEC §13: files, a link and a comment with an image on one task.
+  await seedAttachments(
+    app,
+    taskIdsByTitle['Build component library']!,
+    { id: ids.alice, cookie: cookies.alice },
+    { id: ids.bob, cookie: cookies.bob },
+  );
 
   // A personal task, to show My Tasks content outside projects.
   await call('alice', 'POST', '/tasks', { title: 'Book dentist appointment', assigneeId: ids.alice, dueDate: dayOffset(4) });
@@ -549,12 +561,20 @@ export async function seedWorkspacesDemo(app: FastifyInstance): Promise<{ tasks:
     await call('bob', 'POST', `/tasks/${taskIds['Provision pilot accounts']}/comments`, {
       body: 'Accounts are ready except SSO; waiting on Acme IT.',
     });
+    await seedAttachments(
+      app,
+      taskIds['Admin training session']!,
+      { id: ids.alice, cookie: cookie(ids.alice) },
+      { id: ids.bob, cookie: cookie(ids.bob) },
+    );
     return { tasks: ACME_TASKS.length };
   } catch (err) {
+    const files = await storageKeysOf(db, { workspaceId: workspace.id });
     await db.$transaction(async (tx) => {
       await deleteWorkspace(tx, workspace.id);
       if (createdGuestId) await tx.user.delete({ where: { id: createdGuestId } });
     });
+    await removeObjects(app.storage, files);
     throw err;
   }
 }
