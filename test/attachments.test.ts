@@ -588,6 +588,52 @@ describe('review fixes (#24)', () => {
     }
   });
 
+  it('holds the concurrency cap under parallel requests (no await between check and claim)', async () => {
+    class SlowDisk extends DiskStorage {
+      override async freeBytes() {
+        await new Promise((r) => setTimeout(r, 200));
+        return super.freeBytes();
+      }
+    }
+    const slow = await buildApp({ config: loadConfig(), prisma, logger: false, storage: new SlowDisk(storage().root) });
+    try {
+      const send = () => {
+        const body = multipart([{ name: 'file', filename: 'p.txt', data: 'p' }]);
+        return slow.inject({
+          method: 'POST',
+          url: `/api/v1/tasks/${taskId}/attachments`,
+          headers: { cookie: alice.cookie, ...body.headers },
+          payload: body.payload,
+        });
+      };
+      const results = await Promise.all(Array.from({ length: 8 }, send));
+      const codes = results.map((r) => r.statusCode).sort();
+      expect(codes).toEqual([201, 201, 201, 429, 429, 429, 429, 429]);
+      expect((await send()).statusCode, 'and the slots come back').toBe(201);
+
+      class BrokenDisk extends DiskStorage {
+        override async freeBytes(): Promise<number> {
+          throw new Error('statfs failed');
+        }
+      }
+      const broken = await buildApp({ config: loadConfig(), prisma, logger: false, storage: new BrokenDisk(storage().root) });
+      try {
+        const body = multipart([{ name: 'file', filename: 'p.txt', data: 'p' }]);
+        const res = await broken.inject({
+          method: 'POST',
+          url: `/api/v1/tasks/${taskId}/attachments`,
+          headers: { cookie: alice.cookie, ...body.headers },
+          payload: body.payload,
+        });
+        expect(res.statusCode, 'unknown free space fails closed').toBe(507);
+      } finally {
+        await broken.close();
+      }
+    } finally {
+      await slow.close();
+    }
+  });
+
   it('answers multipart shape limits with 400, not 413', async () => {
     const fields = multipart([...Array.from({ length: 7 }, (_, i) => ({ name: `f${i}`, data: 'x' })), { name: 'file', filename: 'a.txt', data: 'a' }]);
     const res = await ctx.app.inject({
