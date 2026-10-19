@@ -1,7 +1,8 @@
 # Deploying Mekari Project with docker-compose
 
-Stack: `postgres` (16, named volume `pgdata`) → `be` (Fastify, port 3000, internal only) →
-`fe` (nginx on `${HTTP_PORT:-8080}`, serves the SPA and proxies `/api/` + `/health` to `be`).
+Stack: `postgres` (16, named volume `pgdata`) → `be` (Fastify, port 3000, internal only; attachment
+files on the named volume `attachments`) → `fe` (nginx on `${HTTP_PORT:-8080}`, serves the SPA and
+proxies `/api/` + `/health` to `be`).
 
 ## Naming
 The product is **Mekari Project**. Several technical identifiers keep the original `asana` names on
@@ -11,6 +12,7 @@ purpose, because renaming them would detach a running deployment from its data:
 |---|---|---|
 | Compose project | `asana-clone` | Container and network names derive from it |
 | Postgres volume | `asana-clone_pgdata` (pinned with `name:`) | Holds all data; a new name means an empty DB |
+| Attachments volume | `asana-clone_attachments` (pinned with `name:`) | Uploaded files; the DB rows point into it |
 | DB user / database | `asana` / `asana` | Existing clusters were initialised with them |
 | Repos | `asana-clone-be`, `asana-clone-fe` | Unchanged unless the GitHub repos are renamed |
 
@@ -56,6 +58,11 @@ once the backend ships a compiled seed script). The seed creates `admin@example.
 `password123`, so never use it on anything reachable.
 
 ## Backups
+A backup is the database **and** the `attachments` volume (uploaded files, link preview images;
+SPEC §13). Rows reference files by key, so restore both from the same point in time: a database
+without its files shows broken attachments, and files without rows are deleted by the hourly
+sweeper after 24 h.
+
 Logical dump (consistent while running, preferred):
 ```sh
 docker compose exec -T postgres pg_dump -U asana -d asana -Fc > asana-$(date +%F).dump
@@ -73,7 +80,22 @@ docker run --rm -v asana-clone_pgdata:/data -v "$PWD":/backup alpine \
   tar czf /backup/pgdata-$(date +%F).tgz -C /data .
 docker compose start
 ```
-Schedule the `pg_dump` line from cron and copy the dumps off the host.
+Attachments (safe while running: files are written to a temp name and renamed, never changed in
+place). Take it right after the `pg_dump`; a file uploaded in between just has no row yet:
+```sh
+docker run --rm -v asana-clone_attachments:/data:ro -v "$PWD":/backup alpine \
+  tar czf /backup/attachments-$(date +%F).tgz -C /data .
+```
+Restore it with the stack stopped (`be` must not run the sweeper against a half-restored volume):
+```sh
+docker compose stop
+docker run --rm -v asana-clone_attachments:/data -v "$PWD":/backup alpine \
+  sh -c 'rm -rf /data/* && tar xzf /backup/attachments-YYYY-MM-DD.tgz -C /data && chown -R 1000:1000 /data'
+docker compose start
+```
+(`1000:1000` is the `node` user the backend runs as.)
+
+Schedule the `pg_dump` and attachments lines from cron and copy both off the host.
 
 ## Upgrades
 ```sh
@@ -117,6 +139,23 @@ docker compose exec postgres psql -U asana -d asana \
 ```
 Use `npm run create-admin` only for people who should also become workspace admins: it re-enables
 the account *and* makes them ADMIN of the default workspace.
+
+### Upgrading to v1.3 (attachments)
+v1.3 adds file and link attachments (SPEC §13). Its migration only adds tables and columns, but
+take a `pg_dump` first as usual. `docker compose up -d --build` creates the `asana-clone_attachments`
+volume on first start; add it to your backups from then on (see Backups).
+
+- **Size limit:** 100 MB per file. nginx accepts up to 105 MB on `/api/` (multipart overhead) and
+  streams uploads to `be`, which answers `413 PAYLOAD_TOO_LARGE` above 100 MB. Other paths keep
+  nginx's 2 MB limit.
+- **Cloudflare:** Cloudflare proxies (including the quick tunnel used for the preview) cap request
+  bodies at 100 MB *including* multipart overhead, so a file right at the limit can be rejected by
+  Cloudflare with its own 413 before it reaches nginx. Direct and LAN deployments aren't affected.
+- **Link previews:** `be` fetches titles and images for attached links from the internet (with
+  SSRF protection). Set `LINK_PREVIEW_ENABLED=false` in `.env` if the server has no outbound
+  access or you don't want it to make requests; link cards still work, without previews.
+- **Disk:** files live on the Docker host's disk under the volume. Watch free space
+  (`docker system df -v | grep attachments`).
 
 ## Logs
 `docker compose logs -f be` / `fe` / `postgres`.

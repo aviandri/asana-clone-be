@@ -21,6 +21,8 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/prisma ./prisma
 COPY --chown=node:node deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+# Attachment storage (SPEC §13). Owned by node so a fresh named volume mounted here inherits it.
+RUN mkdir -p /data/attachments && chown node:node /data/attachments
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \

@@ -215,6 +215,7 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: asana-clone-be:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -222,3 +223,22 @@ jobs:
         run: |
           cd deploy
           POSTGRES_PASSWORD=x JWT_SECRET=x FE_CONTEXT=. docker compose config --quiet
+      - name: sharp thumbnails a PNG in the runtime image
+        run: |
+          set -euo pipefail
+          run_smoke() { docker run --rm -v "$PWD/.github/scripts:/smoke:ro" "$@" asana-clone-be:ci /smoke/sharp-smoke.cjs; }
+          if node -e 'process.exit(require("./package.json").dependencies?.sharp ? 0 : 1)'; then
+            run_smoke --entrypoint node
+          else
+            # Until the attachments PR adds sharp: prove its prebuilt binary loads on this base
+            # image by installing it into a throwaway container (nothing is persisted).
+            echo "::warning::sharp is not a dependency yet; probing a throwaway install on the runtime image"
+            docker run --rm -u root -v "$PWD/.github/scripts:/smoke:ro" --entrypoint sh asana-clone-be:ci \
+              -c 'npm install --no-save --no-audit --no-fund sharp@^0.35 >/dev/null && node /smoke/sharp-smoke.cjs'
+          fi
+      - name: Attachments volume is writable by the app user
+        run: |
+          set -euo pipefail
+          docker volume create attachments-ci
+          docker run --rm -v attachments-ci:/data/attachments --entrypoint sh asana-clone-be:ci -c \
+            'id -un && mkdir -p /data/attachments/ab/cd && echo ok > /data/attachments/ab/cd/probe && mv /data/attachments/ab/cd/probe /data/attachments/ab/cd/probe2 && ls -ln /data/attachments'

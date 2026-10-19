@@ -41,9 +41,15 @@ services:
       # to the migration) and that create-admin creates on an empty DB. Only used when that
       # workspace is created; rename it later in Workspace settings.
       DEFAULT_WORKSPACE_NAME: ${DEFAULT_WORKSPACE_NAME:-Mekari}
+      # Attachments (SPEC §13): files live on the `attachments` volume; back it up with pgdata.
+      STORAGE_DIR: /data/attachments
+      # Link preview fetching; false keeps link cards but skips fetching titles/images.
+      LINK_PREVIEW_ENABLED: ${LINK_PREVIEW_ENABLED:-true}
       NODE_ENV: production
       PORT: "3000"
       HOST: 0.0.0.0
+    volumes:
+      - attachments:/data/attachments
     # Not published: only reachable through the fe nginx proxy.
     expose:
       - "3000"
@@ -63,3 +69,6 @@ volumes:
     # Pinned to the name compose already derived (<project>_pgdata), so renaming the compose
     # project later can't silently start an empty database.
     name: asana-clone_pgdata
+  attachments:
+    # Pinned like pgdata. Rows in the database point at files here: back up and restore both together.
+    name: asana-clone_attachments
