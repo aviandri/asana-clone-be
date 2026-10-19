@@ -25,10 +25,12 @@ orchestrator — do not silently diverge.
 
 ### v1.1: see §10 Goals/OKRs and §11 Reporting
 
-### v1.2 (in progress): see §12 Workspaces
+### v1.2: see §12 Workspaces
+
+### v1.3 (in progress): see §13 Attachments & links
 
 ### Later (do NOT build yet)
-Attachments, tags, custom fields, real-time (WebSocket), Google SSO, email notifications,
+Tags, custom fields, real-time (WebSocket), Google SSO, email notifications,
 multi-project tasks, timeline/Gantt, portfolios, goal notifications.
 
 ## 2. Tech stack & conventions
@@ -50,8 +52,8 @@ docker-compose (postgres + be + fe/nginx).
 - Auth: cookie `sid` (httpOnly, SameSite=Lax, Secure in prod) holding a signed JWT (7d).
   Every endpoint except `/auth/login`, `/auth/accept-invite`, `/health` requires auth → `401`.
 - List responses: `{ "data": [...] }`. Single resources: the object itself.
-- Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "GONE" | "RATE_LIMITED" | "INTERNAL", "message": string, "details"?: any } }`
-  with matching HTTP status (404/400/401/403/409/410/429/500). `GONE` = used or expired invite; `RATE_LIMITED` = too many login / accept-invite attempts.
+- Errors: `{ "error": { "code": "NOT_FOUND" | "VALIDATION" | "UNAUTHORIZED" | "FORBIDDEN" | "CONFLICT" | "GONE" | "RATE_LIMITED" | "PAYLOAD_TOO_LARGE" | "INTERNAL", "message": string, "details"?: any } }`
+  with matching HTTP status (404/400/401/403/409/410/429/413/500). `GONE` = used or expired invite; `RATE_LIMITED` = too many login / accept-invite attempts.
 - `error.details` (when present, e.g. on `VALIDATION`) is a zod-style issue array: `[{ "path": ["assigneeId"], "message": "..." }]`.
 - `POST` endpoints that create a resource return `201` (FE: treat any 2xx as success)..
 - Ordering uses float `position`. Clients compute a position between neighbours
@@ -573,3 +575,159 @@ on one project, one team, one project with ~8 tasks. `npm run seed -- --workspac
 - **W8** `GET /users` entries include `role` (`UserSummary & { role: WorkspaceRole }`), the person's
   role in the current workspace, for every caller incl. guests (who only see co-members). Guests are
   badged in pickers, and the FE doesn't offer them Owner (W7) or goal ownership (W2).
+
+## 13. Attachments & links (v1.3)
+
+Modelled on Asana: any file type up to **100 MB** can be attached to a **task** or to a **comment**,
+and so can a **link** (URL) with a rich preview card. Comment attachments also appear in the task's
+attachment list, as in Asana. Clients preview what they can and offer "Open in browser", "Open
+with another app" (native apps) and "Download".
+
+### Data model
+```
+enum AttachmentKind { FILE LINK }
+
+Attachment  id, workspaceId, taskId (cascade), commentId? (cascade), uploaderId (restrict), kind,
+            draft(bool, default false), createdAt,
+            -- FILE
+            name (display filename), mimeType (server-sniffed), size (bytes), storageKey (opaque,
+            never returned), sha256, width?, height? (images), hasThumbnail(bool),
+            -- LINK
+            url, title?, description?, siteName?, provider?, previewStatus(PENDING|READY|FAILED),
+            iconKey?, imageKey? (server-cached favicon / og:image, stored like files)
+            @@index([taskId, createdAt]) @@index([commentId]) @@index([draft, createdAt])
+```
+- New `ActivityType` values: `ATTACHMENT_ADDED` (`{attachmentId, kind, name}`; `name` is the
+  filename or link title/URL) and `ATTACHMENT_REMOVED` (`{kind, name}`). Only for **task-level**
+  attachments; comment attachments appear inside their comment, not as separate activity.
+- `Task` gains `attachmentCount` (non-draft, task + comment). `TaskDetail` gains
+  `attachments: Attachment[]` (non-draft, task-level **and** comment ones, newest first).
+  The comment `Story` gains `attachments: Attachment[]` (oldest first).
+
+### Storage
+- `StorageDriver` interface: `put(key, stream) → {size, sha256}`, `get(key, range?) → stream`,
+  `delete(key)`, `stat(key)`. **`STORAGE_DRIVER=disk`** (default) writes under
+  **`STORAGE_DIR`** (default `./data/attachments` in dev, `/data/attachments` in docker, a named
+  volume **`attachments`**, backed up alongside `pgdata`). An `s3` driver (S3/R2/MinIO, env
+  `S3_*`) is a later drop-in, no API change.
+- Keys are random (`ab/cd/<uuid>`), never derived from the filename. Writes go to a temp file then
+  rename, so a half-upload is never visible. Files are deleted **after** the DB commit that removes
+  their row(s) (task/comment/attachment delete, cascades included); a **sweeper** (hourly, in-process)
+  deletes drafts older than 24 h, and storage objects with no row older than 24 h.
+
+### Uploads
+- `POST /tasks/:id/attachments` — `multipart/form-data`, **one** part `file` (+ optional field
+  `draft=true`). Streams to storage; over **100 MB** → abort, `413` with new error code
+  **`PAYLOAD_TOO_LARGE`** (clients treat unknown codes generically). `201` → `Attachment`.
+  - `draft=true` is for the comment composer: invisible to everyone but the uploader, not in
+    `attachmentCount`, no activity. It becomes part of a comment when that comment is posted with its
+    id, else the sweeper removes it.
+  - Without `draft`: a task-level attachment, `ATTACHMENT_ADDED` activity, `updatedAt` bumped.
+- `POST /tasks/:id/attachments/link` — `{url, title?, draft?}`. `url`: absolute `http`/`https`,
+  ≤ 2048 chars, no credentials (`user:pass@`) → else `400 VALIDATION` on `url`. The preview is fetched
+  **synchronously with a 6 s budget**; on timeout/failure the link is still created with
+  `previewStatus: FAILED` (the card falls back to domain + provider icon). `201` → `Attachment`.
+- `POST /attachments/:id/refresh-preview` → re-fetches a LINK preview → `Attachment`.
+- `POST /tasks/:id/comments` gains `attachmentIds?: string[]` (≤ **20**). Each must be a draft
+  **uploaded by the caller on this task** (else `400 VALIDATION` on `attachmentIds`); they become
+  non-draft with this `commentId`. A comment may have an empty `body` **if** it has attachments.
+  `PATCH /comments/:id` can't change attachments in v1.3 (delete the attachment instead).
+- **Filename sanitising** (server, on upload): basename only; strip control chars and Unicode
+  bidi/format controls (U+202A–202E, U+2066–2069, U+200E/F, U+061C); collapse whitespace; ≤ 255
+  bytes UTF-8 keeping the extension; empty → `file`. Clients show `name` as given.
+- **Type detection:** `mimeType` is **sniffed from magic bytes** (`file-type`), falling back to the
+  extension only for text-like types (`txt md csv json log`, served as `text/plain`), else
+  `application/octet-stream`. The client-sent type is ignored.
+- Images (`png jpeg gif webp heic avif bmp tiff`; **not SVG**) get `width`/`height` and server
+  thumbnails via `sharp`. HEIC/AVIF that sharp can't decode → no thumbnail, still a valid file.
+
+### Serving (security-critical: files are user content on the app's own origin)
+- `GET /attachments/:id` → `Attachment`.
+- `GET /attachments/:id/content` → the bytes. **Range requests** (`206`, `Accept-Ranges: bytes`)
+  so video/audio seek. Headers always: `X-Content-Type-Options: nosniff`,
+  `Content-Security-Policy: sandbox; default-src 'none'; img-src 'self'; media-src 'self'`,
+  `Cross-Origin-Resource-Policy: same-origin`, `Cache-Control: private, max-age=0, must-revalidate`,
+  strong `ETag` (= sha256). `Content-Disposition`:
+  - `inline` **only** for the allowlist: `image/png|jpeg|gif|webp|avif|bmp`, `application/pdf`,
+    `video/mp4|webm|quicktime`, `audio/mpeg|mp4|wav|ogg|webm`, `text/plain` (charset utf-8);
+  - `attachment` for everything else (HTML, SVG, XML, JS, Office, archives, executables…) and when
+    `?download=1`. Filename via RFC 6266/5987 (`filename="<ascii fallback>"; filename*=UTF-8''…`).
+- `GET /attachments/:id/thumbnail?size=small|large` (small: fit 240 px, large: fit 1600 px; WebP;
+  `404` if none). LINK attachments: `GET /attachments/:id/icon`, `GET /attachments/:id/image`
+  (server-cached, so clients never contact third-party hosts).
+- **These GET endpoints are ID-addressed and ignore `X-Workspace-Id`** (a web `<img>`/`<video>`
+  can't send headers): visible iff the caller can see the task (§4) and is an active member of its
+  workspace; drafts only to their uploader; else `404`.
+- `DELETE /attachments/:id` → `204`. Allowed: the uploader, the project `OWNER`, or a workspace
+  `ADMIN` (personal tasks: uploader or the task creator). Task-level → `ATTACHMENT_REMOVED` activity.
+
+### Permissions
+- See: can see the task. Add **task-level**: can edit the task (`COMMENTER` → `403`).
+  Add **comment** attachments (drafts / `attachmentIds`): can comment, so `COMMENTER`s can.
+  Guests follow the same rules on the projects they can see.
+- Rate limit uploads: 60 / 10 min per user (`429 RATE_LIMITED`).
+
+### Link previews (SSRF-safe fetcher)
+- Only `http`/`https`, ports 80/443. Resolve DNS **once** and connect to that pinned IP; reject
+  loopback, private (RFC 1918), link-local (incl. 169.254.169.254), CGNAT 100.64/10, `0.0.0.0/8`,
+  multicast, broadcast, IPv6 `::1`, `fc00::/7`, `fe80::/10`, IPv4-mapped forms of all of these.
+  Max **3 redirects**, each re-validated. Total budget 6 s; HTML read capped at **1 MB**
+  (only `text/html`/`application/xhtml+xml`); no cookies or auth sent; UA `MekariProjectBot/1.0`.
+  Env **`LINK_PREVIEW_ENABLED`** (default true) turns fetching off (→ `FAILED`, cards still work);
+  **`LINK_PREVIEW_ALLOW_PRIVATE`** (default false) only for tests.
+- Parse `og:title|description|site_name|image`, `twitter:*`, `<title>`, `<link rel=icon>`, falling
+  back to `/favicon.ico`. Strip tags/controls; title ≤ 300, description ≤ 1000 chars. `og:image`
+  and icon fetched under the same rules (≤ 5 MB, raster image types only, re-encoded by sharp to
+  WebP ≤ 1200 px / 64 px), stored as `imageKey`/`iconKey`.
+- `provider` (from the final hostname; clients bundle the icons; open string — unknown = generic):
+  `google_drive`, `google_docs`, `google_sheets`, `google_slides`, `dropbox`, `onedrive`
+  (incl. SharePoint), `box`, `figma`, `youtube`, `loom`, `github`, `gitlab`, `notion`, `miro`,
+  `jira`, `confluence`, `slack`, `zoom`. User-entered `title` wins over the fetched one.
+
+### Shape
+```ts
+type Attachment = {
+  id: string; workspaceId: string; taskId: string; commentId: string|null;
+  kind: 'FILE'|'LINK';            // open enum on clients
+  draft: boolean; uploader: UserSummary; createdAt: string;
+  // FILE (null for LINK)
+  name: string|null; mimeType: string|null; size: number|null;
+  width: number|null; height: number|null; hasThumbnail: boolean;
+  // LINK (null for FILE)
+  url: string|null; title: string|null; description: string|null; siteName: string|null;
+  provider: string|null; previewStatus: 'PENDING'|'READY'|'FAILED'|null;
+  hasIcon: boolean; hasImage: boolean;
+  // Relative paths (prefix with server origin); clients never build them by hand.
+  contentPath: string|null;  // /api/v1/attachments/:id/content (FILE)
+  thumbnailPath: string|null; // …/thumbnail (FILE with hasThumbnail); append ?size=
+};
+```
+
+### Deployment
+- Fastify multipart (`@fastify/multipart`, streamed, per-route limit 100 MB + overhead); global
+  `bodyLimit` unchanged for JSON. nginx: `client_max_body_size 105m` and
+  `proxy_request_buffering off` on `/api/`; `proxy_read_timeout 300s`. compose: `attachments`
+  volume mounted at `/data/attachments`, `STORAGE_DIR` set. Note: Cloudflare (incl. the quick
+  tunnel used for the preview) caps request bodies at 100 MB, so files right at the limit can fail
+  there; not a concern for direct/LAN deployments.
+- Seed (`--workspaces-demo` and the default seed): one PNG, one PDF, one text file and one LINK with
+  preset `READY` metadata (no network) on a demo task, plus one comment with an image.
+
+### Clients (all three)
+- **Task detail:** an *Attachments* section (grid of thumbnails/cards, newest first; count in the
+  header) with **Attach file** and **Add link**. Files: image thumbnail, else a type icon by
+  `mimeType`/extension, name, size. Links: card with image, icon (provider icon if known), title,
+  site/domain, description (2 lines).
+- **Comments:** composer gets attach (files + link) with chips showing upload progress, cancel and
+  remove; Send is disabled while uploads are running; posts `attachmentIds`. Comment stories render
+  their attachments under the body.
+- **Preview:** images (zoomable, arrow through the task's images), PDF, video/audio, plain text are
+  previewed in-app; everything else shows the type icon + actions. Actions everywhere: **Open in
+  browser** (web: `contentPath` in a new tab; native: the task's web URL with `?workspace=`), **Open
+  with another app** (native), **Download / Save as…**, **Copy link** (LINK: the URL), **Delete**
+  (when allowed). Links open in the browser by default.
+- **Add** via picker, drag-and-drop onto task detail or composer, and paste of image/file from the
+  clipboard (web + Mac). Client-side check of 100 MB before upload; show `413` message if it slips
+  through. Uploads show progress, can be cancelled, failures offer Retry.
+- Never render file content as HTML; never put `url` in an `<a>`/open call unless it is
+  `http`/`https`.
