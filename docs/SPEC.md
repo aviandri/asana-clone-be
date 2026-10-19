@@ -700,6 +700,8 @@ type Attachment = {
   // Relative paths (prefix with server origin); clients never build them by hand.
   contentPath: string|null;  // /api/v1/attachments/:id/content (FILE)
   thumbnailPath: string|null; // …/thumbnail (FILE with hasThumbnail); append ?size=
+  iconPath: string|null;      // …/icon  (LINK with hasIcon)
+  imagePath: string|null;     // …/image (LINK with hasImage)
 };
 ```
 
@@ -743,3 +745,4 @@ type Attachment = {
 - **A8** Removing a task-level attachment also bumps the task's `updatedAt`.
 - **A9** `PATCH /comments/:id` may leave `body` empty when the comment has attachments.
 - **A10** Seeded LINKs use preset `READY` metadata, with no network access.
+- **A11** LINK attachments expose `iconPath` / `imagePath` (null unless `hasIcon` / `hasImage`); clients never build attachment URLs by hand. Provider icons are neutral, app-drawn badges (initials + name), not third-party logos.
