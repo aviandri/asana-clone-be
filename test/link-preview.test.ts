@@ -87,6 +87,9 @@ beforeAll(async () => {
         return send(200, 'image/png', Buffer.concat([ogPng.subarray(0, 8), Buffer.alloc(6 * 1024 * 1024)]));
       case '/slow':
         return; // never answers
+      case '/delayed':
+        setTimeout(() => send(200, 'text/html', PAGE), 400);
+        return;
       default:
         return send(404, 'text/plain', 'nope');
     }
@@ -326,6 +329,14 @@ describe('link attachments', () => {
     } finally {
       await off.close();
     }
+  });
+
+  it('counts link fetches against the 3-at-once cap', async () => {
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => req(alice, 'POST', `/tasks/${taskId}/attachments/link`, { url: at('/delayed') })),
+    );
+    expect(results.map((r) => r.statusCode).sort()).toEqual([201, 201, 201, 429, 429]);
+    expect((await req(alice, 'POST', `/tasks/${taskId}/attachments/link`, { url: at('/page') })).statusCode).toBe(201);
   });
 
   it('validates the URL', async () => {

@@ -170,8 +170,22 @@ export default async function attachmentRoutes(app: FastifyInstance) {
 
   // --- uploads -------------------------------------------------------------
 
-  /** A12: uploads in progress per user (≤ 3). */
+  /** A12: uploads in progress per user (≤ 3); link creation and refreshes count too (each may fetch for 6 s). */
   const inFlight = new Map<string, number>();
+
+  /** Checks and takes a slot in one synchronous step (no await between them); call the result to release it. */
+  function claimSlot(userId: string): () => void {
+    if ((inFlight.get(userId) ?? 0) >= 3) throw new AppError('RATE_LIMITED', 'Too many uploads at once; wait for one to finish');
+    inFlight.set(userId, (inFlight.get(userId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const left = (inFlight.get(userId) ?? 1) - 1;
+      if (left > 0) inFlight.set(userId, left);
+      else inFlight.delete(userId);
+    };
+  }
   const DRAFT_QUOTA = 1024 ** 3;
 
   async function draftBytes(userId: string) {
@@ -210,8 +224,7 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     const userId = req.user.id;
     // Check and take the slot in one synchronous step: with an await between them, parallel requests would
     // all pass the check. Everything after this releases it in the finally below.
-    if ((inFlight.get(userId) ?? 0) >= 3) throw new AppError('RATE_LIMITED', 'Too many uploads at once; wait for one to finish');
-    inFlight.set(userId, (inFlight.get(userId) ?? 0) + 1);
+    const release = claimSlot(userId);
 
     let draftField: boolean | undefined;
     let stored: Awaited<ReturnType<typeof store>> | undefined;
@@ -259,9 +272,7 @@ export default async function attachmentRoutes(app: FastifyInstance) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') throw notFound('Task');
       throw err;
     } finally {
-      const left = (inFlight.get(userId) ?? 1) - 1;
-      if (left > 0) inFlight.set(userId, left);
-      else inFlight.delete(userId);
+      release();
     }
   });
 
@@ -303,11 +314,12 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     const { task, access } = await findTaskWithAccess(db, req.user, id);
     const draft = body.draft ?? false;
     if (!draft && !access.canEdit) throw forbidden('Commenters can attach links to comments only');
-    limiter.hit(req.user.id);
-
-    const fetched = await preview(body.url);
-    const images = await storePreviewImages(fetched);
+    const release = claimSlot(req.user.id);
+    let images = { iconKey: null as string | null, imageKey: null as string | null };
     try {
+      limiter.hit(req.user.id);
+      const fetched = await preview(body.url);
+      images = await storePreviewImages(fetched);
       const attachment = await db.$transaction(async (tx) => {
         const created = await tx.attachment.create({
           data: {
@@ -342,6 +354,8 @@ export default async function attachmentRoutes(app: FastifyInstance) {
       await removeObjects(storage, [images.iconKey, images.imageKey].filter((k): k is string => k !== null), app.log);
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') throw notFound('Task');
       throw err;
+    } finally {
+      release();
     }
   });
 
@@ -351,12 +365,13 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     const { attachment, access } = await findVisibleAttachment(db, req.user, id);
     if (attachment.kind !== 'LINK' || !attachment.url) throw validation('Only links have a preview');
     if (attachment.uploaderId !== req.user.id && !access.canEdit) throw forbidden('Commenters can only refresh their own links');
-    limiter.hit(req.user.id);
-
-    const fetched = await preview(attachment.url);
-    const images = await storePreviewImages(fetched);
+    const release = claimSlot(req.user.id);
+    let images = { iconKey: null as string | null, imageKey: null as string | null };
     let updated;
     try {
+      limiter.hit(req.user.id);
+      const fetched = await preview(attachment.url);
+      images = await storePreviewImages(fetched);
       updated = await db.attachment.update({
         where: { id },
         data: {
@@ -372,6 +387,8 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     } catch (err) {
       await removeObjects(storage, [images.iconKey, images.imageKey].filter((k): k is string => k !== null), app.log);
       throw err;
+    } finally {
+      release();
     }
     // The previous images, now unreferenced (after the commit, like every file removal).
     await removeObjects(storage, [attachment.iconKey, attachment.imageKey].filter((k): k is string => k !== null), req.log);
