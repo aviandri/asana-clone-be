@@ -6,6 +6,7 @@ import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import type { Readable } from 'node:stream';
 import { fileTypeFromBuffer } from 'file-type';
 import sharp from 'sharp';
+import { withImageSlot } from './media.js';
 import { isPublicAddress } from './ssrf.js';
 
 /**
@@ -45,8 +46,18 @@ export class BlockedError extends Error {
 
 type Response = { status: number; headers: http.IncomingHttpHeaders; body: Buffer; truncated: boolean };
 
+/** `work`, or the signal's abort reason if that comes first (DNS lookups can't be cancelled). */
+function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
 /** Checks a URL before any connection: scheme, credentials, port, and every address its host resolves to. */
-async function pin(url: URL, policy: FetchPolicy): Promise<ResolvedAddress> {
+async function pin(url: URL, policy: FetchPolicy, signal: AbortSignal): Promise<ResolvedAddress> {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new BlockedError(`scheme ${url.protocol}`);
   if (url.username || url.password) throw new BlockedError('credentials in URL');
   if (url.port && !policy.allowAnyPort && url.port !== '80' && url.port !== '443') {
@@ -54,7 +65,9 @@ async function pin(url: URL, policy: FetchPolicy): Promise<ResolvedAddress> {
   }
   const host = url.hostname.replace(/^\[|\]$/g, '');
   const family = isIP(host);
-  const addresses: ResolvedAddress[] = family ? [{ address: host, family: family as 4 | 6 }] : await policy.resolve(host);
+  const addresses: ResolvedAddress[] = family
+    ? [{ address: host, family: family as 4 | 6 }]
+    : await raceAbort(policy.resolve(host), signal);
   if (addresses.length === 0) throw new BlockedError('no address');
   // All of them: a host that also points somewhere private is refused outright.
   for (const a of addresses) if (!policy.isAllowedAddress(a.address)) throw new BlockedError(`address ${a.address}`);
@@ -77,7 +90,7 @@ function decoded(res: http.IncomingMessage): Readable {
 
 /** One GET to a pinned address. Reads at most `maxBytes` of the decoded body (counted after decompression). */
 async function get(url: URL, policy: FetchPolicy, signal: AbortSignal, accept: string, maxBytes: number): Promise<Response> {
-  const target = await pin(url, policy);
+  const target = await pin(url, policy, signal);
   signal.throwIfAborted();
   const client = url.protocol === 'https:' ? https : http;
   return new Promise((resolve, reject) => {
@@ -162,12 +175,13 @@ function decodeEntities(s: string): string {
   });
 }
 
-/** Plain text for display: no tags, no controls (bidi/format included), single spaces, at most `max` chars. */
+/** Plain text for display: no tags, no controls or format characters (as for filenames), single spaces, ≤ `max` chars. */
 export function cleanText(raw: string | undefined, max: number): string | null {
   if (!raw) return null;
   const text = decodeEntities(raw.replace(/<[^>]*>/g, ' '))
+    .replace(/(?!\u200D)\p{Cf}/gu, '') // invisible format characters first: JS counts U+FEFF as \s
     .replace(/\s+/g, ' ')
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200B-\u200F\u202A-\u202E\u2066-\u2069\u061C\uFEFF]/g, '')
+    .replace(/\p{Cc}/gu, '')
     .trim();
   if (!text) return null;
   const chars = [...text];
@@ -287,15 +301,19 @@ export async function reencode(bytes: Buffer, box: number): Promise<Buffer | nul
   if (type && RASTER.has(type.mime)) input = bytes;
   else if (type?.mime === 'image/x-icon') input = pngFromIco(bytes);
   if (!input) return null;
-  try {
-    return await sharp(input, { limitInputPixels: 50_000_000, failOn: 'error' })
-      .rotate()
-      .resize({ width: box, height: box, fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: 80 })
-      .toBuffer();
-  } catch {
-    return null;
-  }
+  const source = input;
+  // Shares the process-wide image slots with uploads (A12).
+  return withImageSlot(async () => {
+    try {
+      return await sharp(source, { limitInputPixels: 50_000_000, failOn: 'error' })
+        .rotate()
+        .resize({ width: box, height: box, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 80 })
+        .toBuffer();
+    } catch {
+      return null;
+    }
+  });
 }
 
 // --- the preview -------------------------------------------------------------------

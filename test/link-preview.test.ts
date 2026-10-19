@@ -134,6 +134,24 @@ describe('the fetcher (SPEC §13 SSRF rules)', () => {
   });
 
   it('follows up to 3 redirects, re-checking each hop, and sends no cookie it was given', async () => {
+    // DNS is asked once per hop by name; a second answer (a rebinding server's private one) is never used.
+    const lookups: string[] = [];
+    let calls = 0;
+    const rebinding: FetchPolicy = {
+      ...policy,
+      resolve: async (host) => {
+        lookups.push(host);
+        calls += 1;
+        return [{ address: calls === 1 ? '127.0.0.1' : '10.0.0.1', family: 4 }];
+      },
+    };
+    const first = await fetchPreview(at('/page'), rebinding);
+    expect(first.title, 'the page and both images: one lookup, then pinned').toBe('Launch plan');
+    expect(lookups.length).toBeGreaterThanOrEqual(1);
+    expect(lookups[0]).toBe('site.test');
+    expect(first.icon, 'the image hops resolved again and got the private answer: refused').toBeNull();
+    seen.length = 0;
+
     expect((await fetchPreview(at('/r1'), policy)).title).toBe('Launch plan');
     expect(seen.map((r) => r.url).slice(0, 3)).toEqual(['/r1', '/r2', '/page']);
     expect(seen.every((r) => r.headers.cookie === undefined)).toBe(true);
@@ -180,6 +198,10 @@ describe('the fetcher (SPEC §13 SSRF rules)', () => {
   });
 
   it('keeps to the budget and the size caps', async () => {
+    const hangingDns: FetchPolicy = { ...policy, resolve: () => new Promise(() => {}) };
+    const dnsStarted = Date.now();
+    expect((await fetchPreview(at('/page'), hangingDns, 300)).status).toBe('FAILED');
+    expect(Date.now() - dnsStarted, 'a stuck lookup is cut off too').toBeLessThan(2_000);
     const started = Date.now();
     const slow = await fetchPreview(at('/slow'), policy, 300);
     expect(slow.status).toBe('FAILED');

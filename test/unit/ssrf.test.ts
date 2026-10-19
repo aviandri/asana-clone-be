@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { isPublicAddress, unmapIPv4 } from '../../src/lib/ssrf.js';
 import { cleanText, parsePage, providerFor } from '../../src/lib/link-preview.js';
+import { loadConfig } from '../../src/config.js';
 
 describe('isPublicAddress (SPEC §13 blocked ranges)', () => {
   const blocked: [string, string][] = [
@@ -125,5 +126,16 @@ describe('providerFor', () => {
     ['https://figma.com.evil.example/', null],
   ])('%s → %s', (url, provider) => {
     expect(providerFor(new URL(url))).toBe(provider);
+  });
+});
+
+describe('LINK_PREVIEW_ALLOW_PRIVATE', () => {
+  const base = { DATABASE_URL: 'postgresql://x', JWT_SECRET: 'x'.repeat(32) };
+  it('is off by default and refused in production', () => {
+    expect(loadConfig(base).LINK_PREVIEW_ALLOW_PRIVATE).toBe(false);
+    expect(loadConfig(base).LINK_PREVIEW_ENABLED).toBe(true);
+    expect(loadConfig({ ...base, LINK_PREVIEW_ALLOW_PRIVATE: 'true' }).LINK_PREVIEW_ALLOW_PRIVATE).toBe(true);
+    expect(() => loadConfig({ ...base, NODE_ENV: 'production', LINK_PREVIEW_ALLOW_PRIVATE: 'true' })).toThrow(/LINK_PREVIEW_ALLOW_PRIVATE/);
+    expect(loadConfig({ ...base, LINK_PREVIEW_ENABLED: 'false' }).LINK_PREVIEW_ENABLED).toBe(false);
   });
 });
