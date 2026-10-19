@@ -76,12 +76,14 @@ describe('POST /tasks', () => {
       subtaskCount: 0,
       completedSubtaskCount: 0,
       commentCount: 0,
+      attachmentCount: 0,
       project: { id: project.id, name: 'Website', color: '#4186e0' },
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
       followers: [expect.objectContaining({ id: alice.user.id })],
       subtasks: [],
       parent: null,
+      attachments: [],
     });
     expect(await activityTypes(t.id)).toEqual(['CREATED']);
   });

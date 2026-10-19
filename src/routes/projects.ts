@@ -12,6 +12,7 @@ import {
   toSection,
 } from '../lib/projects.js';
 import { hexColor, idParams, parse, queryBool, uuid } from '../lib/validate.js';
+import { removeObjects, storageKeysOf } from '../lib/attachments.js';
 import { currentMember, findMember, requireNotGuest } from '../lib/workspaces.js';
 
 const privacy = z.enum(['PUBLIC', 'TEAM', 'PRIVATE']);
@@ -115,7 +116,9 @@ export default async function projectRoutes(app: FastifyInstance) {
   app.delete('/projects/:id', async (req, reply) => {
     const { id } = parse(idParams, req.params);
     assertCanManage(await projectAccess(app.db, req.user, id));
-    await app.db.project.delete({ where: { id } });
+    const files = await storageKeysOf(app.db, { task: { projectId: id } });
+    await app.db.project.delete({ where: { id } }); // tasks and their attachments cascade
+    await removeObjects(app.storage, files, req.log);
     return reply.status(204).send();
   });
 

@@ -62,6 +62,7 @@ describe('comments', () => {
       id: expect.any(String),
       author: expect.objectContaining({ id: carol.user.id, name: 'Carol' }),
       body: 'Looks good',
+      attachments: [],
       createdAt: expect.any(String),
       editedAt: null,
     });

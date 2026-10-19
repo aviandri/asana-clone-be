@@ -3,6 +3,7 @@ import { notFound } from '../errors.js';
 import { projectAccess, visibleProjectsWhere } from './access.js';
 import { requireMember, type Member } from './workspaces.js';
 import { toDateOnly, toUserSummary, userSummarySelect } from './serialize.js';
+import { attachmentInclude, toAttachment } from './attachments.js';
 
 /** Prisma include for the `Task` shape (SPEC §5). */
 export const taskInclude = {
@@ -10,7 +11,7 @@ export const taskInclude = {
   creator: { select: userSummarySelect },
   project: { select: { id: true, name: true, color: true } },
   subtasks: { select: { completed: true } },
-  _count: { select: { comments: true } },
+  _count: { select: { comments: true, attachments: { where: { draft: false } } } },
 } satisfies Prisma.TaskInclude;
 
 export type TaskRow = Prisma.TaskGetPayload<{ include: typeof taskInclude }>;
@@ -35,6 +36,7 @@ export function toTask(t: TaskRow) {
     subtaskCount: t.subtasks.length,
     completedSubtaskCount: t.subtasks.filter((s) => s.completed).length,
     commentCount: t._count.comments,
+    attachmentCount: t._count.attachments,
     project: t.project,
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
@@ -48,6 +50,8 @@ export async function loadTaskDetail(db: PrismaClient, id: string) {
       ...taskInclude,
       followers: { include: { user: { select: userSummarySelect } }, orderBy: { user: { name: 'asc' } } },
       parent: { select: { id: true, title: true } },
+      // Task-level and comment attachments alike (SPEC §13); drafts belong to a comment being written.
+      attachments: { where: { draft: false }, include: attachmentInclude, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] },
     },
   });
   if (!t) throw notFound('Task');
@@ -61,6 +65,7 @@ export async function loadTaskDetail(db: PrismaClient, id: string) {
     followers: t.followers.map((f) => toUserSummary(f.user)),
     subtasks: subtasks.map(toTask),
     parent: t.parent,
+    attachments: t.attachments.map(toAttachment),
   };
 }
 

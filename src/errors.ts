@@ -9,6 +9,7 @@ export type ErrorCode =
   | 'FORBIDDEN'
   | 'CONFLICT'
   | 'GONE'
+  | 'PAYLOAD_TOO_LARGE'
   | 'RATE_LIMITED'
   | 'INTERNAL';
 
@@ -19,6 +20,7 @@ const STATUS: Record<ErrorCode, number> = {
   NOT_FOUND: 404,
   CONFLICT: 409,
   GONE: 410,
+  PAYLOAD_TOO_LARGE: 413,
   RATE_LIMITED: 429,
   INTERNAL: 500,
 };
@@ -63,7 +65,15 @@ export function errorHandler(err: FastifyError | Error, req: FastifyRequest, rep
   if (status && status >= 400 && status < 500) {
     // Fastify-level client errors: malformed JSON, unsupported media type, body too large, ...
     const code: ErrorCode =
-      status === 404 ? 'NOT_FOUND' : status === 401 ? 'UNAUTHORIZED' : status === 429 ? 'RATE_LIMITED' : 'VALIDATION';
+      status === 404
+        ? 'NOT_FOUND'
+        : status === 401
+          ? 'UNAUTHORIZED'
+          : status === 413
+            ? 'PAYLOAD_TOO_LARGE'
+            : status === 429
+              ? 'RATE_LIMITED'
+              : 'VALIDATION';
     return reply.status(status).send(body(code, err.message));
   }
   req.log.error(err);

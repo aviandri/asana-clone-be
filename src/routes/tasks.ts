@@ -16,6 +16,7 @@ import {
   visibleTasksWhere,
 } from '../lib/tasks.js';
 import { dateOnly, idParams, parse, queryBool, uuid } from '../lib/validate.js';
+import { removeObjects, storageKeysOf } from '../lib/attachments.js';
 import { currentMember, findMember } from '../lib/workspaces.js';
 
 const priority = z.enum(['NONE', 'LOW', 'MEDIUM', 'HIGH']);
@@ -353,7 +354,10 @@ export default async function taskRoutes(app: FastifyInstance) {
     const { id } = parse(idParams, req.params);
     const { access } = await findTaskWithAccess(db, req.user, id);
     if (!access.canEdit) throw forbidden('Commenters can only add comments in this project');
-    await db.task.delete({ where: { id } }); // subtasks cascade
+    const files = await storageKeysOf(db, { OR: [{ taskId: id }, { task: { parentId: id } }] });
+    await db.task.delete({ where: { id } }); // subtasks, comments and attachments cascade
+    // After the commit (SPEC §13); anything missed here is an orphan the sweeper removes.
+    await removeObjects(app.storage, files, req.log);
     return reply.status(204).send();
   });
 

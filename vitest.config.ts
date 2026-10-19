@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { defineConfig } from 'vitest/config';
 
 const TEST_DATABASE_URL =
@@ -23,6 +25,9 @@ export default defineConfig({
       APP_URL: 'http://localhost:5173',
       // Tests log in many times from one IP; the limiter has its own test with a low max.
       AUTH_RATE_LIMIT_MAX: '10000',
+      // Attachments go to a scratch directory (each test file wipes it), never ./data.
+      STORAGE_DIR: join(tmpdir(), `asana-be-test-attachments-${process.pid}`),
+      UPLOAD_RATE_LIMIT_MAX: '10000',
     },
   },
 });

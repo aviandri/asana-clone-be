@@ -26,6 +26,19 @@ const EnvSchema = z.object({
     .refine(isValidTimeZone, 'APP_TIMEZONE must be an IANA time zone, e.g. Asia/Jakarta'),
   /** Name of the workspace `create-admin` and `seed` create when none exists (SPEC §12). */
   DEFAULT_WORKSPACE_NAME: z.string().trim().min(1).max(100).default('Mekari'),
+  /** Attachments (SPEC §13): only `disk` in v1.3; `s3` is a later drop-in. */
+  STORAGE_DRIVER: z.enum(['disk']).default('disk'),
+  /** Where the disk driver keeps files (`/data/attachments` in docker, on the `attachments` volume). */
+  STORAGE_DIR: z.string().min(1).default('./data/attachments'),
+  /** Per-file upload limit in bytes (SPEC §13 A1: 100 MB = 104,857,600). */
+  MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(104_857_600),
+  /** Uploads (files and links) per user per 10 minutes. */
+  UPLOAD_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+  /**
+   * The longest a whole request may take, in ms (Fastify's requestTimeout; 0 = none). 15 minutes lets a
+   * 100 MB upload through at ~0.9 Mbit/s. nginx's timeouts are per read/write, so this is the only total.
+   */
+  REQUEST_TIMEOUT_MS: z.coerce.number().int().nonnegative().default(900_000),
 });
 
 export type Config = z.infer<typeof EnvSchema>;
