@@ -340,6 +340,31 @@ describe('serving (SPEC §13: user content on our origin)', () => {
     expect(cached.headers['x-content-type-options']).toBe('nosniff');
   });
 
+  it('serves an empty file, and keeps the §13 headers on 416, 304 and errors', async () => {
+    const empty = await uploaded(alice, { filename: 'empty.txt', data: '' });
+    expect(empty.size).toBe(0);
+    const whole = await req(bob, 'GET', `/attachments/${empty.id}/content`);
+    expect(whole.statusCode).toBe(200);
+    expect(whole.headers['content-length']).toBe('0');
+    expect(whole.rawPayload.length).toBe(0);
+    // The web text preview's first request.
+    const ranged = await req(bob, 'GET', `/attachments/${empty.id}/content`, undefined, { range: 'bytes=0-1048575' });
+    expect(ranged.statusCode).toBe(416);
+    expect(ranged.headers['content-range']).toBe('bytes */0');
+    const cached = await req(bob, 'GET', `/attachments/${empty.id}/content`, undefined, { 'if-none-match': whole.headers.etag as string });
+    expect(cached.statusCode).toBe(304);
+    const missing = await req(bob, 'GET', '/attachments/00000000-0000-4000-8000-000000000000/content');
+    const badId = await req(bob, 'GET', '/attachments/not-a-uuid/thumbnail');
+    const noThumb = await req(bob, 'GET', `/attachments/${empty.id}/thumbnail`);
+    expect([missing.statusCode, badId.statusCode, noThumb.statusCode]).toEqual([404, 400, 404]);
+    for (const res of [whole, ranged, cached, missing, badId, noThumb]) {
+      expect(res.headers['x-content-type-options'], String(res.statusCode)).toBe('nosniff');
+      expect(res.headers['content-security-policy']).toBe(SANDBOX);
+      expect(res.headers['cross-origin-resource-policy']).toBe('same-origin');
+      expect(res.headers['cache-control']).toBe('private, max-age=0, must-revalidate');
+    }
+  });
+
   it('ignores X-Workspace-Id on ID-addressed reads, and hides attachments from other workspaces', async () => {
     const a = await uploaded(alice, { filename: 'mock.png', data: png });
     const elsewhere = await prisma.workspace.findFirstOrThrow({ where: { name: 'Elsewhere' } });
