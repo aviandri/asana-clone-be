@@ -1006,7 +1006,7 @@ admin or invites, or file upload and download.
   - Notification: its task's URL. `list_notifications` result: `/inbox?workspace=<wsId>`; `my_tasks`:
     `/my-tasks?workspace=<wsId>`.
   - Person: `url: null`.
-  - Attachment: FILE → `/api/v1/attachments/<id>/download` (works with the browser's cookie); LINK → its
+  - Attachment: FILE → `/api/v1/attachments/<id>/content?download=1` (works with the browser's cookie); LINK → its
     external `url`. Attachments in `get_task` carry `kind`.
   - Every `url` also gets `workspace=<wsId>` (`?` or `&`). The FE applies it and strips it, so links work
     across workspaces (see M25).
@@ -1075,7 +1075,7 @@ admin or invites, or file upload and download.
   per-process and in-memory, like the existing limiters. DCR at the client cap → `503 temporarily_unavailable` after an
   inline prune. SDK input-validation errors keep the SDK's `MCP error -32602: …` text. The 401/403/405/429
   responses are sent before `reply.hijack()`. The Origin check is ours, run before the SDK (it supports wildcards).
-- **M25** Deep links with `workspace=<wsId>` (M6). FILE attachments link to `/api/v1/attachments/<id>/download`
+- **M25** Deep links with `workspace=<wsId>` (M6). FILE attachments link to `/api/v1/attachments/<id>/content?download=1`
   (the user's browser has the cookie). Bytes are never returned through MCP.
 - **M26** Tool notes: `follow_task` is caller-only (a subset of REST). `update_project` requires canManage, as in
   REST. Guests get exactly what REST gives them (`list_teams` / `list_goals` → `[]`, `get_goal` → `NOT_FOUND`).
