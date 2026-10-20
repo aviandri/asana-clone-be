@@ -1100,9 +1100,10 @@ admin or invites, or file upload and download.
 - **M33** (from the PR C review)
   - `list_projects`, `list_people`, `list_goals` and `list_teams` take `limit` and `cursor` like the other lists, and
     return `nextCursor`.
-  - An internal ticket (M14) is **refused** on `/api/v1/me/tokens*`, `/api/v1/users/me` (`PATCH`), `/api/v1/admin/*`,
-    `/api/v1/auth/*`, `/api/v1/oauth/*` and `/api/v1/workspaces/*/members*` and invites, whatever the scope (an allowlist
-    of the routes the tools use is better still).
+  - An internal ticket (M14) opens **only an allowlist** of the exact `METHOD route` pairs the tools call, whatever the scope.
+    Everything else is `403`, including tokens, `PATCH /users/me`, admin, invites, memberships, OAuth and every `/auth/*`
+    route except `GET /auth/me` (the caller's own profile and workspaces, used by `whoami` and the M15 default).
+  - `mark_notifications_read` returns `{marked: number | "all", workspaceIds: string[]}`.
   - Unexpected (non-REST) errors become `INTERNAL: something went wrong` (logged server-side) and never reach the model
     raw.
   - Every entity, including `get_task.parent` and people (`url: null`), carries `url`.
