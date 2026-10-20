@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { forbidden } from '../errors.js';
-import { INSTRUCTIONS, registerTools } from '../mcp/tools.js';
+import { INSTRUCTIONS, refuseWriteTools, registerTools } from '../mcp/tools.js';
 import type { ToolContext } from '../mcp/rest.js';
 
 /** MCP requests per token per minute (SPEC §14). In memory, per process, like the other limiters (M24). */
@@ -66,6 +66,7 @@ export default async function mcpRoutes(app: FastifyInstance, opts: { version: s
         'MCP tool call',
       ),
     );
+    if (principal.token.scope !== 'WRITE') refuseWriteTools(server);
     // Stateless (no Mcp-Session-Id), plain JSON responses (M24).
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     // Everything above answered through Fastify; from here the SDK writes the raw response.

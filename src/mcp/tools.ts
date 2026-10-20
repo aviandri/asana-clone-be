@@ -1093,3 +1093,22 @@ export function registerTools(server: McpServer, ctx: ToolContext, log: (entry: 
 }
 
 export const toolNames = () => tools.map((t) => t.name);
+
+type RequestHandler = (request: { params?: { name?: unknown } }, extra: unknown) => Promise<unknown>;
+
+/**
+ * READ tokens: the write tools aren't registered (so tools/list hides them), and calling one by name
+ * answers FORBIDDEN rather than the SDK's "not found" (SPEC §14). The SDK keeps request handlers in a
+ * private map; the version is pinned exactly (M27) and a test fails if this ever stops working.
+ */
+export function refuseWriteTools(server: McpServer) {
+  const handlers = (server.server as unknown as { _requestHandlers: Map<string, RequestHandler> })._requestHandlers;
+  const original = handlers.get('tools/call');
+  if (!original) throw new Error('MCP SDK: no tools/call handler to wrap');
+  const writes = new Set(WRITE_TOOLS());
+  handlers.set('tools/call', async (request, extra) =>
+    typeof request.params?.name === 'string' && writes.has(request.params.name)
+      ? { content: [{ type: 'text', text: 'FORBIDDEN: this token is read-only' }], isError: true }
+      : original(request, extra),
+  );
+}
