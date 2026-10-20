@@ -14,7 +14,7 @@ import {
   toAttachment,
 } from '../lib/attachments.js';
 import { recordActivity } from '../lib/events.js';
-import { contentDisposition, sanitizeFilename } from '../lib/filenames.js';
+import { contentDisposition, plainText, sanitizeFilename } from '../lib/filenames.js';
 import { contentType, isInline, isRasterImage, processImage, sniffMimeType, SNIFF_BYTES } from '../lib/media.js';
 import { derivedKey, newStorageKey, type StorageDriver } from '../lib/storage.js';
 import { fetchPreview, providerFor, type Preview } from '../lib/link-preview.js';
@@ -39,7 +39,8 @@ const linkUrl = z
 
 const NewLink = z.object({
   url: linkUrl,
-  title: z.string().trim().max(300).optional().transform((t) => t || undefined),
+  // Cleaned like a filename: no controls, bidi or zero-width characters (A12).
+  title: z.string().trim().max(300).optional().transform((t) => (t === undefined ? undefined : plainText(t) || undefined)),
   draft: z.boolean().optional(),
 });
 const ContentQuery = z.object({ download: z.enum(['1', 'true']).optional() });
@@ -359,7 +360,10 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     }
   });
 
-  /** Re-fetches a LINK's preview: its uploader or anyone who can edit the task. A typed title is kept. */
+  /**
+   * Re-fetches a LINK's preview: its uploader or anyone who can edit the task. A typed title is kept, and so
+   * is the whole previous preview when the fetch fails (a site that's down for a moment shouldn't wipe a card).
+   */
   app.post('/attachments/:id/refresh-preview', async (req) => {
     const { id } = parse(idParams, req.params);
     const { attachment, access } = await findVisibleAttachment(db, req.user, id);
@@ -371,6 +375,7 @@ export default async function attachmentRoutes(app: FastifyInstance) {
     try {
       limiter.hit(req.user.id);
       const fetched = await preview(attachment.url);
+      if (fetched.status === 'FAILED') return toAttachment(attachment);
       images = await storePreviewImages(fetched);
       updated = await db.attachment.update({
         where: { id },

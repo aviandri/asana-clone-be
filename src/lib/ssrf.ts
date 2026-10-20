@@ -23,17 +23,16 @@ for (const [net, prefix] of [
 ] as const) {
   blocked.addSubnet(net, prefix, 'ipv4');
 }
+// IPv6: only global unicast (2000::/3) at all, which rules out loopback, ULA, link-local, multicast,
+// NAT64 (64:ff9b::/96, 64:ff9b:1::/48), IPv4-compatible (::a.b.c.d) and SIIT (::ffff:0:a.b.c.d) in one go.
+// IPv4-mapped (::ffff:a.b.c.d) is unmapped and checked as IPv4 first.
+const globalUnicast = new BlockList();
+globalUnicast.addSubnet('2000::', 3, 'ipv6');
 for (const [net, prefix] of [
-  ['::', 128], // unspecified
-  ['::1', 128], // loopback
-  ['64:ff9b::', 96], // NAT64: reaches IPv4 through a translator
-  ['100::', 64], // discard
+  ['2001::', 23], // IETF protocol assignments, incl. Teredo (2001::/32), which embeds an IPv4 address
   ['2001:db8::', 32], // documentation
   ['2002::', 16], // 6to4: embeds an IPv4 address
-  ['fc00::', 7], // unique local
-  ['fe80::', 10], // link-local
-  ['fec0::', 10], // site-local (deprecated)
-  ['ff00::', 8], // multicast
+  ['3fff::', 20], // documentation (RFC 9637)
 ] as const) {
   blocked.addSubnet(net, prefix, 'ipv6');
 }
@@ -57,6 +56,6 @@ export function isPublicAddress(address: string): boolean {
   const ip = unmapIPv4(address.replace(/^\[|\]$/g, ''));
   const family = isIP(ip);
   if (family === 4) return !blocked.check(ip, 'ipv4');
-  if (family === 6) return !blocked.check(ip, 'ipv6');
+  if (family === 6) return globalUnicast.check(ip, 'ipv6') && !blocked.check(ip, 'ipv6');
   return false;
 }

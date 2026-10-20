@@ -39,6 +39,15 @@ describe('isPublicAddress (SPEC §13 blocked ranges)', () => {
     ['IPv4-mapped RFC 1918', '::ffff:10.0.0.1'],
     ['IPv4-mapped CGNAT', '::ffff:100.64.0.1'],
     ['IPv4-mapped, long form', '0:0:0:0:0:ffff:192.168.0.1'],
+    ['SIIT ::ffff:0:a.b.c.d', '::ffff:0:127.0.0.1'],
+    ['IPv4-compatible', '::127.0.0.1'],
+    ['IPv4-compatible, public', '::8.8.8.8'],
+    ['local-use NAT64', '64:ff9b:1::a00:1'],
+    ['Teredo', '2001:0:4136:e378:8000:63bf:3fff:fdd2'],
+    ['IETF protocol assignments', '2001:2::1'],
+    ['documentation 3fff::/20', '3fff::1'],
+    ['outside 2000::/3', '4000::1'],
+    ['discard', '100::1'],
     ['bracketed', '[::1]'],
     ['not an IP at all', 'localhost'],
     ['empty', ''],
@@ -47,7 +56,7 @@ describe('isPublicAddress (SPEC §13 blocked ranges)', () => {
     expect(isPublicAddress(ip)).toBe(false);
   });
 
-  it.each([['8.8.8.8'], ['1.1.1.1'], ['93.184.216.34'], ['172.32.0.1'], ['100.128.0.1'], ['2606:4700::1111'], ['::ffff:8.8.8.8']])(
+  it.each([['8.8.8.8'], ['1.1.1.1'], ['93.184.216.34'], ['172.32.0.1'], ['100.128.0.1'], ['2606:4700::1111'], ['2001:4860:4860::8888'], ['2a00:1450::1'], ['::ffff:8.8.8.8']])(
     'allows public %s',
     (ip) => {
       expect(isPublicAddress(ip)).toBe(true);
@@ -84,6 +93,39 @@ describe('parsePage', () => {
       icon: 'https://example.com/a/favicon.png',
     });
     expect(parsePage('<title>Only <i>this</i></title>', base).title).toBe('Only this');
+  });
+
+  it('skips comments, scripts and styles, stops at </head>, and prefers a plain icon', () => {
+    const page = parsePage(
+      `<!-- <meta property="og:title" content="commented"> --><script>"<meta property='og:title' content='scripted'>"</script>
+       <style>a::after{content:"<title>styled</title>"}</style><TITLE>Real &#xD800;title</TITLE>
+       <link rel=apple-touch-icon href=/touch.png><link rel=icon href=/plain.png>
+       <meta name=description content=unquoted&amp;fine/>
+       </head><body><meta property="og:title" content="in the body">`,
+      base,
+    );
+    expect(page).toMatchObject({ title: 'Real &#xD800;title', description: 'unquoted&fine/', icon: 'https://example.com/plain.png' });
+    expect(parsePage('<header></header><title>Header</title>', base).title, '</header> is not </head>').toBe('Header');
+  });
+
+  it('is linear on pathological input', () => {
+    const mb = 1024 * 1024;
+    for (const [what, html] of [
+      ['meta starts', '<meta '.repeat(mb / 6)],
+      ['link starts', '<link '.repeat(mb / 6)],
+      ['title starts', '<title>'.repeat(mb / 7)],
+      ['one long attribute name', `<meta ${'a'.repeat(mb)}`],
+      ['unterminated quote', `<meta content="${'<meta '.repeat(mb / 6)}`],
+      ['quotes and equals', '<meta a="" b=\'\' c=d '.repeat(mb / 20)],
+    ] as const) {
+      const started = performance.now();
+      parsePage(html, base);
+      expect(performance.now() - started, what).toBeLessThan(500);
+    }
+    const started = performance.now();
+    cleanText(`${'<'.repeat(mb)}x`, 300);
+    cleanText('&#1'.repeat(mb / 3), 300);
+    expect(performance.now() - started, 'cleanText').toBeLessThan(500);
   });
 
   it('falls back to /favicon.ico, ignores non-http images and caps lengths', () => {

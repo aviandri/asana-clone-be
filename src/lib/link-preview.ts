@@ -3,9 +3,10 @@ import http from 'node:http';
 import https from 'node:https';
 import { isIP } from 'node:net';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
-import type { Readable } from 'node:stream';
+import { pipeline, type Readable } from 'node:stream';
 import { fileTypeFromBuffer } from 'file-type';
 import sharp from 'sharp';
+import { plainText } from './filenames.js';
 import { withImageSlot } from './media.js';
 import { isPublicAddress } from './ssrf.js';
 
@@ -75,17 +76,22 @@ async function pin(url: URL, policy: FetchPolicy, signal: AbortSignal): Promise<
 }
 
 function decoded(res: http.IncomingMessage): Readable {
-  switch ((res.headers['content-encoding'] ?? '').toLowerCase()) {
-    case 'gzip':
-    case 'x-gzip':
-      return res.pipe(createGunzip());
-    case 'deflate':
-      return res.pipe(createInflate());
-    case 'br':
-      return res.pipe(createBrotliDecompress());
-    default:
-      return res;
-  }
+  const decoder = (() => {
+    switch ((res.headers['content-encoding'] ?? '').toLowerCase()) {
+      case 'gzip':
+      case 'x-gzip':
+        return createGunzip();
+      case 'deflate':
+        return createInflate();
+      case 'br':
+        return createBrotliDecompress();
+      default:
+        return null;
+    }
+  })();
+  // pipeline, not pipe: a response that errors or closes early destroys the decoder with an error, so the
+  // read always ends (pipe leaves the decoder waiting forever for an end that never comes).
+  return decoder ? pipeline(res, decoder, () => {}) : res;
 }
 
 /** One GET to a pinned address. Reads at most `maxBytes` of the decoded body (counted after decompression). */
@@ -140,6 +146,8 @@ async function get(url: URL, policy: FetchPolicy, signal: AbortSignal, accept: s
         });
         body.on('end', () => resolve({ status, headers: res.headers, body: Buffer.concat(chunks), truncated }));
         body.on('error', (err) => (truncated ? undefined : reject(err)));
+        // After 'end' or truncation this is a no-op; otherwise the body was cut off.
+        body.on('close', () => reject(new Error('response closed before its end')));
       },
     );
     req.on('error', reject);
@@ -148,7 +156,12 @@ async function get(url: URL, policy: FetchPolicy, signal: AbortSignal, accept: s
 }
 
 /** GET with redirects (each one a fully re-checked hop). Returns the final URL with the response. */
-async function follow(start: URL, policy: FetchPolicy, signal: AbortSignal, accept: string, maxBytes: number) {
+function follow(start: URL, policy: FetchPolicy, signal: AbortSignal, accept: string, maxBytes: number) {
+  // The budget holds whatever a server or stream does: this settles at the deadline (the abort tears the request down).
+  return raceAbort(hops(start, policy, signal, accept, maxBytes), signal);
+}
+
+async function hops(start: URL, policy: FetchPolicy, signal: AbortSignal, accept: string, maxBytes: number) {
   let url = start;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const res = await get(url, policy, signal, accept, maxBytes);
@@ -162,14 +175,22 @@ async function follow(start: URL, policy: FetchPolicy, signal: AbortSignal, acce
 }
 
 // --- HTML ------------------------------------------------------------------------
+// Hand-rolled and linear: a page is attacker-chosen, and a backtracking regex over it can stall the event
+// loop for minutes (many `<meta ` starts with no `>`). No regex below runs over unbounded input.
+
+/** Only the head matters; past this many chars (or `</head>`) nothing is read. */
+const MAX_PARSE_CHARS = 256 * 1024;
+/** Longer attribute values and titles are cut before decoding (cleanText keeps ≤ 1000 chars anyway). */
+const MAX_VALUE_CHARS = 4096;
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 
 function decodeEntities(s: string): string {
-  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e: string) => {
+  return s.replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]{1,8});/gi, (m, e: string) => {
     if (e[0] === '#') {
       const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : m;
+      const surrogate = code >= 0xd800 && code <= 0xdfff;
+      return code > 0 && code <= 0x10ffff && !surrogate ? String.fromCodePoint(code) : m;
     }
     return ENTITIES[e.toLowerCase()] ?? m;
   });
@@ -178,27 +199,81 @@ function decodeEntities(s: string): string {
 /** Plain text for display: no tags, no controls or format characters (as for filenames), single spaces, ≤ `max` chars. */
 export function cleanText(raw: string | undefined, max: number): string | null {
   if (!raw) return null;
-  const text = decodeEntities(raw.replace(/<[^>]*>/g, ' '))
-    .replace(/(?!\u200D)\p{Cf}/gu, '') // invisible format characters first: JS counts U+FEFF as \s
-    .replace(/\s+/g, ' ')
-    .replace(/\p{Cc}/gu, '')
-    .trim();
+  const text = plainText(decodeEntities(raw.slice(0, MAX_VALUE_CHARS).replace(/<[^<>]*>/g, ' ')));
   if (!text) return null;
   const chars = [...text];
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : text;
 }
 
-function attributes(tag: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const m of tag.matchAll(/([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) {
-    const key = m[1]!.toLowerCase();
-    if (!(key in out)) out[key] = decodeEntities(m[2] ?? m[3] ?? m[4] ?? '');
-  }
-  return out;
-}
+const isSpace = (c: string | undefined) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+const isLetter = (c: string | undefined) => c !== undefined && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
 
-/** One `<name …>` tag; a `>` inside a quoted attribute value doesn't end it. */
-const TAG = (name: string) => new RegExp(`<${name}\\b(?:[^>"']|"[^"]*"|'[^']*')*>`, 'gi');
+type StartTag = { name: string; attrs: Record<string, string>; text?: string };
+
+/**
+ * The start tags of `html` in order, with their attributes (the first of a name wins; values entity-decoded).
+ * `<title>`'s text comes with it; script/style bodies and comments are skipped. Linear: the scan only moves
+ * forward, and an unterminated tag, quote, comment or raw-text element ends it.
+ */
+function* startTags(html: string): Generator<StartTag> {
+  const n = html.length;
+  let i = 0;
+  for (;;) {
+    const lt = html.indexOf('<', i);
+    if (lt < 0) return;
+    i = lt + 1;
+    if (html.startsWith('!--', i)) {
+      const close = html.indexOf('-->', i + 3);
+      if (close < 0) return;
+      i = close + 3;
+      continue;
+    }
+    if (html[i] === '/' && html.slice(i + 1, i + 5).toLowerCase() === 'head' && !isLetter(html[i + 5])) return;
+    if (!isLetter(html[i])) continue; // an end tag, <!doctype>, or a stray '<'
+    let k = i;
+    while (k < n && !isSpace(html[k]) && html[k] !== '/' && html[k] !== '>') k++;
+    const name = html.slice(i, k).toLowerCase();
+    const attrs: Record<string, string> = Object.create(null);
+    for (;;) {
+      while (isSpace(html[k]) || html[k] === '/') k++;
+      if (k >= n) return;
+      if (html[k] === '>') break;
+      const keyStart = k;
+      while (k < n && !isSpace(html[k]) && html[k] !== '/' && html[k] !== '>' && html[k] !== '=') k++;
+      const key = html.slice(keyStart, k).toLowerCase();
+      while (isSpace(html[k])) k++;
+      let value = '';
+      if (html[k] === '=') {
+        k++;
+        while (isSpace(html[k])) k++;
+        const quote = html[k];
+        if (quote === '"' || quote === "'") {
+          const close = html.indexOf(quote, k + 1);
+          if (close < 0) return;
+          value = html.slice(k + 1, Math.min(close, k + 1 + MAX_VALUE_CHARS));
+          k = close + 1;
+        } else {
+          const valueStart = k;
+          while (k < n && !isSpace(html[k]) && html[k] !== '>') k++;
+          value = html.slice(valueStart, Math.min(k, valueStart + MAX_VALUE_CHARS));
+        }
+      }
+      if (key && !(key in attrs)) attrs[key] = decodeEntities(value);
+    }
+    i = k + 1;
+    if (name === 'title' || name === 'script' || name === 'style') {
+      // Raw text up to the matching end tag: tags inside it aren't tags.
+      const endTag = new RegExp(`</${name}`, 'gi');
+      endTag.lastIndex = i;
+      const close = endTag.exec(html)?.index;
+      if (close === undefined) return;
+      if (name === 'title') yield { name, attrs, text: html.slice(i, Math.min(close, i + MAX_VALUE_CHARS)) };
+      i = close;
+      continue;
+    }
+    yield { name, attrs };
+  }
+}
 
 export type PageMeta = {
   title: string | null;
@@ -211,19 +286,25 @@ export type PageMeta = {
 /** og:*, twitter:*, <title>, <meta name=description> and <link rel=icon>, resolved against `base`. */
 export function parsePage(html: string, base: URL): PageMeta {
   const meta = new Map<string, string>();
-  for (const [tag] of html.matchAll(TAG('meta'))) {
-    const a = attributes(tag);
-    const key = (a.property ?? a.name ?? '').toLowerCase();
-    if (key && a.content !== undefined && !meta.has(key)) meta.set(key, a.content);
-  }
-  const titleTag = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1];
+  let titleTag: string | undefined;
   let icon: string | undefined;
-  for (const [tag] of html.matchAll(TAG('link'))) {
-    const a = attributes(tag);
-    const rel = (a.rel ?? '').toLowerCase().split(/\s+/);
-    if (a.href && (rel.includes('icon') || rel.includes('apple-touch-icon'))) {
-      icon ??= a.href;
-      if (rel.includes('icon')) break; // a plain icon wins over a touch icon
+  let plainIcon = false;
+  for (const tag of startTags(html.slice(0, MAX_PARSE_CHARS))) {
+    const a = tag.attrs;
+    if (tag.name === 'meta') {
+      const key = (a.property ?? a.name ?? '').toLowerCase();
+      if (key && a.content !== undefined && !meta.has(key)) meta.set(key, a.content);
+    } else if (tag.name === 'title') {
+      titleTag ??= tag.text;
+    } else if (tag.name === 'link' && !plainIcon) {
+      const rel = (a.rel ?? '').toLowerCase().split(/\s+/);
+      if (a.href && (rel.includes('icon') || rel.includes('apple-touch-icon'))) {
+        // A plain icon wins over a touch icon.
+        if (rel.includes('icon')) {
+          icon = a.href;
+          plainIcon = true;
+        } else icon ??= a.href;
+      }
     }
   }
   const absolute = (href: string | undefined) => {

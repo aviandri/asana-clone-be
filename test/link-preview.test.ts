@@ -85,6 +85,21 @@ beforeAll(async () => {
         return send(200, 'text/html', '<meta property="og:image" content="/huge.png"><title>Huge</title>');
       case '/huge.png':
         return send(200, 'image/png', Buffer.concat([ogPng.subarray(0, 8), Buffer.alloc(6 * 1024 * 1024)]));
+      case '/gzip-close': {
+        // A gzip body cut off mid-stream: the decoder must not wait forever for its end.
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip' });
+        res.write(gzipSync(PAGE).subarray(0, 40));
+        setTimeout(() => res.socket!.destroy(), 50);
+        return;
+      }
+      case '/gzip-stall': {
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Encoding': 'gzip' });
+        res.write(gzipSync(PAGE).subarray(0, 40));
+        return; // never ends
+      }
+      case '/redos':
+        // 1 MB of tag starts that never close: quadratic for a backtracking parser.
+        return send(200, 'text/html', '<title>Slow?</title>' + '<meta '.repeat((1024 * 1024) / 6));
       case '/slow':
         return; // never answers
       case '/delayed':
@@ -220,6 +235,23 @@ describe('the fetcher (SPEC §13 SSRF rules)', () => {
     expect((await fetchPreview(at('/pdf'), policy)).status, 'not HTML').toBe('FAILED');
     expect((await fetchPreview(at('/missing'), policy)).status).toBe('FAILED');
   });
+
+  it('ends a gzip body that is cut off at once, and one that stalls at the budget', async () => {
+    let started = Date.now();
+    const cut = await fetchPreview(at('/gzip-close'), policy, 5_000);
+    expect(cut.status).toBe('FAILED');
+    expect(Date.now() - started, 'the decoder errors when the response closes').toBeLessThan(1_000);
+    started = Date.now();
+    expect((await fetchPreview(at('/gzip-stall'), policy, 500)).status).toBe('FAILED');
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('parses a 1 MB pathological page in linear time', async () => {
+    const started = Date.now();
+    const p = await fetchPreview(at('/redos'), policy);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect([p.status, p.title]).toEqual(['READY', 'Slow?']);
+  });
 });
 
 // --- the routes ------------------------------------------------------------------------------
@@ -337,6 +369,34 @@ describe('link attachments', () => {
     );
     expect(results.map((r) => r.statusCode).sort()).toEqual([201, 201, 201, 429, 429]);
     expect((await req(alice, 'POST', `/tasks/${taskId}/attachments/link`, { url: at('/page') })).statusCode).toBe(201);
+  });
+
+  it('releases the slot when a gzip page closes early', async () => {
+    const cut = await Promise.all(Array.from({ length: 3 }, () => req(alice, 'POST', `/tasks/${taskId}/attachments/link`, { url: at('/gzip-close') })));
+    expect(cut.map((r) => [r.statusCode, r.json().previewStatus])).toEqual(Array(3).fill([201, 'FAILED']));
+    expect((await req(alice, 'POST', `/tasks/${taskId}/attachments/link`, { url: at('/page') })).statusCode).toBe(201);
+  });
+
+  it('keeps the previous preview when a refresh fails', async () => {
+    const link = (await req(alice, 'POST', `/tasks/${taskId}/attachments/link`, { url: at('/page') })).json();
+    const before = await prisma.attachment.findUniqueOrThrow({ where: { id: link.id } });
+    await prisma.attachment.update({ where: { id: link.id }, data: { url: at('/missing') } });
+    const refreshed = await req(alice, 'POST', `/attachments/${link.id}/refresh-preview`);
+    expect(refreshed.statusCode, refreshed.body).toBe(200);
+    expect(refreshed.json()).toMatchObject({ title: 'Launch plan', siteName: 'Fixture', previewStatus: 'READY', hasIcon: true, hasImage: true });
+    const after = await prisma.attachment.findUniqueOrThrow({ where: { id: link.id } });
+    expect(after).toEqual({ ...before, url: at('/missing') });
+    expect(await (app.storage as DiskStorage).stat(before.iconKey!), 'the icon is still there').not.toBeNull();
+  });
+
+  it('cleans a typed title like a filename', async () => {
+    const typed = await req(alice, 'POST', `/tasks/${taskId}/attachments/link`, {
+      url: at('/page'),
+      title: ' Plan\u202Etxt.exe\u0007 \u200B\n v2 \uD800 \u{1F468}\u200D\u{1F469} ',
+    });
+    expect(typed.json().title).toBe('Plantxt.exe v2 \uFFFD \u{1F468}\u200D\u{1F469}');
+    const invisible = await req(alice, 'POST', `/tasks/${taskId}/attachments/link`, { url: at('/page'), title: '\u200B\u202E\u0000' });
+    expect(invisible.json().title, 'nothing visible: the page title it is').toBe('Launch plan');
   });
 
   it('validates the URL', async () => {
