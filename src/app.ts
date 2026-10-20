@@ -21,6 +21,7 @@ import reportRoutes from './routes/reports.js';
 import workspaceRoutes from './routes/workspaces.js';
 import attachmentRoutes from './routes/attachments.js';
 import tokenRoutes from './routes/tokens.js';
+import oauthRoutes, { oauthRequestRoutes, sweepOAuth } from './routes/oauth.js';
 import { sweepAttachments } from './lib/attachments.js';
 import { DiskStorage, type StorageDriver } from './lib/storage.js';
 import { defaultPolicy, permissivePolicy, type FetchPolicy } from './lib/link-preview.js';
@@ -40,7 +41,10 @@ export type AppOptions = {
     | 'STORAGE_MIN_FREE_BYTES'
   > &
     Partial<
-      Pick<Config, 'REQUEST_TIMEOUT_MS' | 'LINK_PREVIEW_ENABLED' | 'LINK_PREVIEW_ALLOW_PRIVATE' | 'TRUST_PROXY_HOPS' | 'MCP_ENABLED'>
+      Pick<
+        Config,
+        'REQUEST_TIMEOUT_MS' | 'LINK_PREVIEW_ENABLED' | 'LINK_PREVIEW_ALLOW_PRIVATE' | 'TRUST_PROXY_HOPS' | 'MCP_ENABLED' | 'OAUTH_REGISTER_RATE_LIMIT' | 'OAUTH_AUTHORIZE_RATE_LIMIT'
+      >
     >;
   /** The link-preview fetcher's network policy (tests); default from LINK_PREVIEW_ALLOW_PRIVATE. */
   fetchPolicy?: FetchPolicy;
@@ -117,9 +121,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       await api.register(workspaceRoutes);
       await api.register(attachmentRoutes);
       await api.register(tokenRoutes);
+      await api.register(oauthRequestRoutes);
     },
     { prefix: '/api/v1' },
   );
+
+  // OAuth for MCP clients (SPEC §14): /.well-known/oauth-*, /oauth/*; 404s when MCP is off.
+  await app.register(oauthRoutes);
 
   if (opts.config.MCP_ENABLED) {
     // The MCP endpoint (SPEC §14): bearer auth only. The tools arrive with the MCP server itself.
@@ -140,12 +148,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     const schedule = (delay: number) => {
       if (closed) return;
       timer = setTimeout(() => {
-        sweepAttachments(app.db, app.storage, new Date(), app.log)
+        // Independent: one failing never skips the other.
+        const attachments = sweepAttachments(app.db, app.storage, new Date(), app.log)
           .then((r) => {
             if (r.drafts || r.orphans) app.log.info(r, 'Attachment sweep');
           })
-          .catch((err: unknown) => app.log.error({ err }, 'Attachment sweep failed'))
-          .finally(() => schedule(SWEEP_INTERVAL_MS));
+          .catch((err: unknown) => app.log.error({ err }, 'Attachment sweep failed'));
+        const oauth = sweepOAuth(app.db, new Date())
+          .then((r) => {
+            if (Object.values(r).some((n) => n > 0)) app.log.info(r, 'OAuth sweep');
+          })
+          .catch((err: unknown) => app.log.error({ err }, 'OAuth sweep failed'));
+        void Promise.all([attachments, oauth]).finally(() => schedule(SWEEP_INTERVAL_MS));
       }, delay);
       timer.unref();
     };

@@ -69,6 +69,10 @@ const EnvSchema = z.object({
   LINK_PREVIEW_ALLOW_PRIVATE: envBool(false),
   /** The MCP server, its OAuth endpoints and personal access tokens (SPEC §14). Needs an https APP_URL. */
   MCP_ENABLED: envBool(false),
+  /** OAuth dynamic client registrations per IP per hour (M3): claude.ai registers from a few shared IPs. */
+  OAUTH_REGISTER_RATE_LIMIT: z.coerce.number().int().positive().default(30),
+  /** /oauth/authorize requests per IP per minute: an unknown https client_id makes the server fetch it (CIMD). */
+  OAUTH_AUTHORIZE_RATE_LIMIT: z.coerce.number().int().positive().default(60),
 })
   .refine((c) => !c.MCP_ENABLED || isSecureOrLocal(c.APP_URL, c.NODE_ENV === 'production'), {
     message: 'MCP_ENABLED needs an https APP_URL (http only for localhost / 127.0.0.1, and not in production)',

@@ -6,7 +6,8 @@ import type { ApiToken, OAuthClient, Prisma, PrismaClient, TokenScope, User } fr
  * random bytes (base64url). Only the sha256 is stored; the plaintext is shown once.
  */
 
-export type TokenKind = 'mpat' | 'mpoa' | 'mpor';
+/** PAT, OAuth access, OAuth refresh, OAuth authorization code (M32). */
+export type TokenKind = 'mpat' | 'mpoa' | 'mpor' | 'mpoc';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -85,7 +86,16 @@ export async function listTokens(db: Db, userId: string, now: Date): Promise<Api
   return [...pats.map(toTokenInfo), ...grants].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-/** Revokes a whole OAuth grant: its refresh tokens and every access token issued in it. */
+/**
+ * Every change to a user's grants (issue, rotate, revoke, password change) runs in a transaction that
+ * holds this lock first (a password change holds it by updating the row). So a refresh racing a
+ * revocation either sees the revocation, or its new tokens exist by the time the revocation runs.
+ */
+export async function lockUser(tx: Prisma.TransactionClient, userId: string) {
+  await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId}::uuid FOR UPDATE`;
+}
+
+/** Revokes a whole OAuth grant: its refresh tokens and every access token issued in it. Call under lockUser. */
 export async function revokeFamily(db: Db, family: string, now: Date) {
   await db.oAuthRefresh.updateMany({ where: { family, revokedAt: null }, data: { revokedAt: now } });
   await db.apiToken.updateMany({ where: { oauthFamily: family, revokedAt: null }, data: { revokedAt: now } });
@@ -104,6 +114,7 @@ export async function revokeToken(db: PrismaClient, userId: string, id: string, 
     }
     const grant = await tx.oAuthRefresh.findFirst({ where: { family: id, userId }, select: { id: true } });
     if (!grant) return false;
+    await lockUser(tx, userId);
     await revokeFamily(tx, id, now);
     return true;
   });
