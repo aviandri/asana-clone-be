@@ -20,6 +20,7 @@ import goalRoutes from './routes/goals.js';
 import reportRoutes from './routes/reports.js';
 import workspaceRoutes from './routes/workspaces.js';
 import attachmentRoutes from './routes/attachments.js';
+import tokenRoutes from './routes/tokens.js';
 import { sweepAttachments } from './lib/attachments.js';
 import { DiskStorage, type StorageDriver } from './lib/storage.js';
 import { defaultPolicy, permissivePolicy, type FetchPolicy } from './lib/link-preview.js';
@@ -38,7 +39,9 @@ export type AppOptions = {
     | 'UPLOAD_RATE_LIMIT_MAX'
     | 'STORAGE_MIN_FREE_BYTES'
   > &
-    Partial<Pick<Config, 'REQUEST_TIMEOUT_MS' | 'LINK_PREVIEW_ENABLED' | 'LINK_PREVIEW_ALLOW_PRIVATE'>>;
+    Partial<
+      Pick<Config, 'REQUEST_TIMEOUT_MS' | 'LINK_PREVIEW_ENABLED' | 'LINK_PREVIEW_ALLOW_PRIVATE' | 'TRUST_PROXY_HOPS' | 'MCP_ENABLED'>
+    >;
   /** The link-preview fetcher's network policy (tests); default from LINK_PREVIEW_ALLOW_PRIVATE. */
   fetchPolicy?: FetchPolicy;
   prisma?: PrismaClient;
@@ -64,7 +67,8 @@ declare module 'fastify' {
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: opts.logger ?? opts.config.NODE_ENV !== 'test',
-    trustProxy: true,
+    // Hops, not `true`: with `true` the client's own leftmost X-Forwarded-For entry becomes req.ip (M2).
+    trustProxy: opts.config.TRUST_PROXY_HOPS ?? 1,
     // A total cap: nginx streams upload bodies through unbuffered, so a stalled client would otherwise hold a
     // socket forever (its own timeouts are per read/write).
     requestTimeout: opts.config.REQUEST_TIMEOUT_MS ?? 900_000,
@@ -91,6 +95,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   await app.register(authPlugin, {
     secret: opts.config.JWT_SECRET,
     secureCookie: opts.config.NODE_ENV === 'production',
+    appUrl: opts.config.APP_URL,
   });
 
   await app.register(healthRoutes);
@@ -111,9 +116,22 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       await api.register(reportRoutes);
       await api.register(workspaceRoutes);
       await api.register(attachmentRoutes);
+      await api.register(tokenRoutes);
     },
     { prefix: '/api/v1' },
   );
+
+  if (opts.config.MCP_ENABLED) {
+    // The MCP endpoint (SPEC §14): bearer auth only. The tools arrive with the MCP server itself.
+    app.post('/mcp', { config: { bearer: true } }, async () => {
+      throw new AppError('NOT_FOUND', 'The MCP server is not available yet');
+    });
+  } else {
+    // Feature off: a plain 404, not the 401 an unknown route gets without a session.
+    app.post('/mcp', { config: { public: true } }, async () => {
+      throw new AppError('NOT_FOUND', 'MCP is not enabled on this server');
+    });
+  }
 
   if (opts.sweeper ?? opts.config.NODE_ENV !== 'test') {
     let timer: NodeJS.Timeout | undefined;

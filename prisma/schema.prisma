@@ -7,6 +7,21 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum TokenScope {
+  READ
+  WRITE
+}
+
+enum TokenSource {
+  PAT
+  OAUTH
+}
+
+enum OAuthClientSource {
+  DCR
+  CIMD
+}
+
 enum WorkspaceRole {
   ADMIN
   MEMBER
@@ -161,6 +176,10 @@ model User {
   ownedKeyResults      KeyResult[]     @relation("KeyResultOwner")
   goalUpdates          GoalUpdate[]
   attachments          Attachment[]
+  apiTokens            ApiToken[]
+  oauthRequests        OAuthRequest[]
+  oauthCodes           OAuthCode[]
+  oauthRefreshes       OAuthRefresh[]
 }
 
 model Invite {
@@ -486,4 +505,112 @@ model GoalUpdate {
   author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
   @@index([goalId, createdAt])
+}
+
+// --- SPEC §14: personal access tokens and OAuth for the MCP server -----------------------------
+// Every secret is stored as its sha256 (hex): they are 32 random bytes, so no slow hash is needed.
+
+/// A bearer token for /mcp: a PAT, or an OAuth access token (1 h, in an OAuthRefresh family).
+model ApiToken {
+  id            String      @id @default(uuid()) @db.Uuid
+  userId        String      @db.Uuid
+  name          String
+  source        TokenSource
+  scope         TokenScope
+  /// The first 12 characters (incl. the `mpat_` / `mpoa_` type prefix), for display.
+  prefix        String
+  tokenHash     String      @unique
+  oauthClientId String?     @db.Uuid
+  /// OAuth: the OAuthRefresh.family this access token was issued in.
+  oauthFamily   String?     @db.Uuid
+  createdAt     DateTime    @default(now())
+  lastUsedAt    DateTime?
+  expiresAt     DateTime?
+  revokedAt     DateTime?
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  oauthClient OAuthClient? @relation(fields: [oauthClientId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([oauthFamily])
+}
+
+/// A registered OAuth client: by dynamic registration (DCR) or a client ID metadata document (CIMD, M11).
+model OAuthClient {
+  id           String            @id @default(uuid()) @db.Uuid
+  /// Random for DCR; the metadata document's https URL for CIMD.
+  clientId     String            @unique
+  source       OAuthClientSource @default(DCR)
+  name         String
+  redirectUris String[]
+  createdAt    DateTime          @default(now())
+  lastUsedAt   DateTime?
+  /// CIMD: when the metadata document was last fetched.
+  cachedAt     DateTime?
+
+  tokens    ApiToken[]
+  requests  OAuthRequest[]
+  codes     OAuthCode[]
+  refreshes OAuthRefresh[]
+}
+
+/// A validated /oauth/authorize request waiting for the user's decision (10 min, M18). Bound to a user on decision.
+model OAuthRequest {
+  id            String     @id @default(uuid()) @db.Uuid
+  clientId      String     @db.Uuid
+  redirectUri   String
+  codeChallenge String
+  /// What was requested: READ = only `read`.
+  scope         TokenScope
+  resource      String
+  state         String?
+  expiresAt     DateTime
+  decidedAt     DateTime?
+  userId        String?    @db.Uuid
+  createdAt     DateTime   @default(now())
+
+  client OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user   User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// An authorization code (60 s, single use). `family` is set on exchange, so a reused code can revoke what it issued.
+model OAuthCode {
+  id            String     @id @default(uuid()) @db.Uuid
+  codeHash      String     @unique
+  clientId      String     @db.Uuid
+  userId        String     @db.Uuid
+  redirectUri   String
+  codeChallenge String
+  scope         TokenScope
+  resource      String
+  expiresAt     DateTime
+  usedAt        DateTime?
+  family        String?    @db.Uuid
+  createdAt     DateTime   @default(now())
+
+  client OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// A rotating refresh token (30 d). One family per grant; reuse after rotation revokes the family (M20).
+model OAuthRefresh {
+  id        String     @id @default(uuid()) @db.Uuid
+  tokenHash String     @unique
+  prefix    String
+  family    String     @db.Uuid
+  clientId  String     @db.Uuid
+  userId    String     @db.Uuid
+  scope     TokenScope
+  createdAt DateTime   @default(now())
+  expiresAt DateTime
+  usedAt    DateTime?
+  revokedAt DateTime?
+
+  client OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([family])
+  @@index([userId, revokedAt])
 }
