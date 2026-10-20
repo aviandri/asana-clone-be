@@ -155,23 +155,46 @@ async function get(url: URL, policy: FetchPolicy, signal: AbortSignal, accept: s
   });
 }
 
-/** GET with redirects (each one a fully re-checked hop). Returns the final URL with the response. */
-function follow(start: URL, policy: FetchPolicy, signal: AbortSignal, accept: string, maxBytes: number) {
+/**
+ * GET with redirects (each one a fully re-checked hop). Returns the final URL with the response.
+ * `sameHost`: a redirect to another scheme, host or port is refused (client metadata documents, M11).
+ */
+function follow(start: URL, policy: FetchPolicy, signal: AbortSignal, accept: string, maxBytes: number, sameHost = false) {
   // The budget holds whatever a server or stream does: this settles at the deadline (the abort tears the request down).
-  return raceAbort(hops(start, policy, signal, accept, maxBytes), signal);
+  return raceAbort(hops(start, policy, signal, accept, maxBytes, sameHost), signal);
 }
 
-async function hops(start: URL, policy: FetchPolicy, signal: AbortSignal, accept: string, maxBytes: number) {
+async function hops(start: URL, policy: FetchPolicy, signal: AbortSignal, accept: string, maxBytes: number, sameHost: boolean) {
   let url = start;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const res = await get(url, policy, signal, accept, maxBytes);
     if (res.status >= 300 && res.status < 400 && res.headers.location) {
-      url = new URL(res.headers.location, url);
+      const next = new URL(res.headers.location, url);
+      if (sameHost && next.origin !== start.origin) throw new BlockedError(`redirect to another origin ${next.origin}`);
+      url = next;
       continue;
     }
     return { url, res };
   }
   throw new BlockedError('too many redirects');
+}
+
+/**
+ * A small document (an OAuth client metadata document, M11) under the same SSRF rules as previews:
+ * same-origin redirects only, `maxBytes` at most (more is an error, not a cut), one budget.
+ */
+export async function fetchDocument(
+  rawUrl: string,
+  policy: FetchPolicy,
+  opts: { accept: string; maxBytes: number; budgetMs: number },
+): Promise<{ contentType: string; body: Buffer }> {
+  const signal = AbortSignal.timeout(opts.budgetMs);
+  // One byte over the cap tells a too-large document from one that's exactly at it.
+  const { res } = await follow(new URL(rawUrl), policy, signal, opts.accept, opts.maxBytes + 1, true);
+  if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+  if (res.truncated) throw new Error(`larger than ${opts.maxBytes} bytes`);
+  const contentType = String(res.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase();
+  return { contentType, body: res.body };
 }
 
 // --- HTML ------------------------------------------------------------------------
