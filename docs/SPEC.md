@@ -1097,3 +1097,12 @@ admin or invites, or file upload and download.
   - Pruning **never** deletes a client that has a live request (`expiresAt > now`), an unused live code, or a token.
   - Authorization codes use the prefix **`mpoc_`**.
   - Rate-limit and other generic errors on `/oauth/*` use the RFC 6749 `{error, error_description}` shape.
+- **M33** (from the PR C review)
+  - `list_projects`, `list_people`, `list_goals` and `list_teams` take `limit` and `cursor` like the other lists, and
+    return `nextCursor`.
+  - An internal ticket (M14) is **refused** on `/api/v1/me/tokens*`, `/api/v1/users/me` (`PATCH`), `/api/v1/admin/*`,
+    `/api/v1/auth/*`, `/api/v1/oauth/*` and `/api/v1/workspaces/*/members*` and invites, whatever the scope (an allowlist
+    of the routes the tools use is better still).
+  - Unexpected (non-REST) errors become `INTERNAL: something went wrong` (logged server-side) and never reach the model
+    raw.
+  - Every entity, including `get_task.parent` and people (`url: null`), carries `url`.
