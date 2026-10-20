@@ -1,4 +1,5 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from 'fastify';
+import { isInternal } from './mcp/internal.js';
 import rateLimit from '@fastify/rate-limit';
 import type { PrismaClient } from '@prisma/client';
 import type { Config } from './config.js';
@@ -21,6 +22,8 @@ import reportRoutes from './routes/reports.js';
 import workspaceRoutes from './routes/workspaces.js';
 import attachmentRoutes from './routes/attachments.js';
 import tokenRoutes from './routes/tokens.js';
+import mcpRoutes from './routes/mcp.js';
+import { APP_VERSION } from './version.js';
 import oauthRoutes, { oauthRequestRoutes, sweepOAuth } from './routes/oauth.js';
 import { sweepAttachments } from './lib/attachments.js';
 import { DiskStorage, type StorageDriver } from './lib/storage.js';
@@ -49,7 +52,8 @@ export type AppOptions = {
   /** The link-preview fetcher's network policy (tests); default from LINK_PREVIEW_ALLOW_PRIVATE. */
   fetchPolicy?: FetchPolicy;
   prisma?: PrismaClient;
-  logger?: boolean;
+  /** true/false, or Fastify logger options (tests capture log lines with a stream). */
+  logger?: boolean | Exclude<FastifyServerOptions['logger'], undefined>;
   /** Attachment storage; default: the disk driver under STORAGE_DIR. */
   storage?: StorageDriver;
   /** The hourly attachment sweeper (SPEC §13); default on, except under NODE_ENV=test. */
@@ -68,9 +72,35 @@ declare module 'fastify' {
   }
 }
 
+/**
+ * Fastify's logger, with one change: an MCP tool's injected REST call logs its path without the query
+ * (search terms and emails stay out of the request log; the tool call itself is logged with via: "mcp").
+ */
+function loggerOptions(logger: AppOptions['logger'], env: string): FastifyServerOptions['logger'] {
+  const enabled = logger ?? env !== 'test';
+  if (enabled === false) return false;
+  const base = enabled === true ? {} : (enabled as Exclude<typeof enabled, boolean>);
+  return {
+    ...(base as object),
+    serializers: {
+      req: (req: FastifyRequest) => {
+        const internal = req.raw ? isInternal(req.raw) : false;
+        return {
+          method: req.method,
+          url: internal ? req.url.split('?')[0] : req.url,
+          hostname: req.hostname,
+          remoteAddress: req.ip,
+          remotePort: req.socket?.remotePort,
+          ...(internal ? { via: 'mcp' } : {}),
+        };
+      },
+    },
+  };
+}
+
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: opts.logger ?? opts.config.NODE_ENV !== 'test',
+    logger: loggerOptions(opts.logger, opts.config.NODE_ENV),
     // Hops, not `true`: with `true` the client's own leftmost X-Forwarded-For entry becomes req.ip (M2).
     trustProxy: opts.config.TRUST_PROXY_HOPS ?? 1,
     // A total cap: nginx streams upload bodies through unbuffered, so a stalled client would otherwise hold a
@@ -130,10 +160,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   await app.register(oauthRoutes);
 
   if (opts.config.MCP_ENABLED) {
-    // The MCP endpoint (SPEC §14): bearer auth only. The tools arrive with the MCP server itself.
-    app.post('/mcp', { config: { bearer: true } }, async () => {
-      throw new AppError('NOT_FOUND', 'The MCP server is not available yet');
-    });
+    // The MCP endpoint (SPEC §14): bearer auth only.
+    await app.register(mcpRoutes, { version: APP_VERSION });
   } else {
     // Feature off: a plain 404 for every method, not the 401 an unknown route gets without a session.
     app.all('/mcp', { config: { public: true } }, async () => {

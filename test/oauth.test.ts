@@ -170,8 +170,16 @@ async function grant(s: Session, opts: Parameters<typeof codeFor>[1] = {}) {
   return { ...c, tokens: res.json() as { access_token: string; refresh_token: string; scope: string; expires_in: number; token_type: string } };
 }
 
+/** 200 when /mcp accepts the access token (a JSON-RPC ping), 401 when it doesn't. */
 const mcpStatus = async (accessToken: string) =>
-  (await app.inject({ method: 'POST', url: '/mcp', headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' }, payload: '{}' })).statusCode;
+  (
+    await app.inject({
+      method: 'POST',
+      url: '/mcp',
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+    })
+  ).statusCode;
 
 const refreshWith = (refreshToken: string, clientId: string, extra: Record<string, string> = {}) =>
   token({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId, ...extra });
@@ -455,7 +463,7 @@ describe('token endpoint', () => {
     expect(t).toMatchObject({ token_type: 'Bearer', expires_in: 3600, scope: 'read write' });
     expect(t.access_token).toMatch(/^mpoa_/);
     expect(t.refresh_token).toMatch(/^mpor_/);
-    expect(await mcpStatus(t.access_token), 'authenticated (the placeholder 404)').toBe(404);
+    expect(await mcpStatus(t.access_token), 'authenticated').toBe(200);
     const listed = (await app.inject({ method: 'GET', url: '/api/v1/me/tokens', headers: { cookie: alice.cookie } })).json().data;
     expect(listed).toEqual([expect.objectContaining({ source: 'OAUTH', name: 'Claude', scope: 'WRITE', prefix: t.refresh_token.slice(0, 12) })]);
   });
@@ -488,7 +496,7 @@ describe('token endpoint', () => {
     const c = await codeFor(alice);
     const form = { grant_type: 'authorization_code', code: c.code, redirect_uri: CALLBACK, client_id: c.clientId, code_verifier: c.verifier };
     const first = (await token(form)).json();
-    expect(await mcpStatus(first.access_token)).toBe(404);
+    expect(await mcpStatus(first.access_token)).toBe(200);
     expect((await token(form)).json().error).toBe('invalid_grant');
     expect(await mcpStatus(first.access_token)).toBe(401);
     expect((await refreshWith(first.refresh_token, c.clientId)).json().error).toBe('invalid_grant');
@@ -524,9 +532,9 @@ describe('refresh rotation', () => {
     const t2 = next.json();
     expect(t2.refresh_token).not.toBe(tokens.refresh_token);
     expect(t2.scope).toBe('read write');
-    expect(await mcpStatus(t2.access_token)).toBe(404);
+    expect(await mcpStatus(t2.access_token)).toBe(200);
     const third = (await refreshWith(t2.refresh_token, clientId)).json();
-    expect(await mcpStatus(third.access_token)).toBe(404);
+    expect(await mcpStatus(third.access_token)).toBe(200);
     expect((await app.inject({ method: 'GET', url: '/api/v1/me/tokens', headers: { cookie: alice.cookie } })).json().data, 'still one grant').toHaveLength(1);
   });
 
@@ -536,7 +544,7 @@ describe('refresh rotation', () => {
     const t2 = (await refreshWith(tokens.refresh_token, clientId)).json();
     const raced = await refreshWith(tokens.refresh_token, clientId);
     expect([raced.statusCode, raced.json().error]).toEqual([400, 'invalid_grant']);
-    expect(await mcpStatus(t2.access_token), 'family kept').toBe(404);
+    expect(await mcpStatus(t2.access_token), 'family kept').toBe(200);
 
     await prisma.oAuthRefresh.updateMany({ where: { tokenHash: hashToken(tokens.refresh_token) }, data: { usedAt: new Date(Date.now() - 31_000) } });
     expect((await refreshWith(tokens.refresh_token, clientId)).json().error).toBe('invalid_grant');
@@ -550,7 +558,7 @@ describe('refresh rotation', () => {
     const results = await Promise.all(Array.from({ length: 4 }, () => refreshWith(tokens.refresh_token, clientId)));
     expect(results.map((r) => r.statusCode).sort()).toEqual([200, 400, 400, 400]);
     const winner = results.find((r) => r.statusCode === 200)!.json();
-    expect(await mcpStatus(winner.access_token)).toBe(404);
+    expect(await mcpStatus(winner.access_token)).toBe(200);
   });
 
   it('every refresh failure is invalid_grant (M13)', async () => {
@@ -618,7 +626,7 @@ describe('revocation (RFC 7009)', () => {
       app.inject({ method: 'POST', url: '/oauth/revoke', headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: new URLSearchParams(form).toString() });
 
     expect((await revoke({ token: a.tokens.refresh_token, client_id: b.clientId })).statusCode, 'not its client').toBe(200);
-    expect(await mcpStatus(a.tokens.access_token)).toBe(404);
+    expect(await mcpStatus(a.tokens.access_token)).toBe(200);
     expect((await revoke({ token: a.tokens.refresh_token, client_id: a.clientId })).statusCode).toBe(200);
     expect(await mcpStatus(a.tokens.access_token)).toBe(401);
     expect((await refreshWith(a.tokens.refresh_token, a.clientId)).json().error).toBe('invalid_grant');
@@ -743,7 +751,7 @@ describe('sweepOAuth', () => {
     expect(await prisma.oAuthClient.findUnique({ where: { id: freshClient.id } })).not.toBeNull();
     expect(await prisma.oAuthRequest.findUnique({ where: { id: keepRequest.id } })).not.toBeNull();
     expect(await prisma.apiToken.count({ where: { name: 'recent' } })).toBe(1);
-    expect(await mcpStatus(live.tokens.access_token), 'the live grant and its client stay').toBe(404);
+    expect(await mcpStatus(live.tokens.access_token), 'the live grant and its client stay').toBe(200);
   });
 
   it('prunes a client unused for 30 days once its grants are dead', async () => {
