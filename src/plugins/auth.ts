@@ -62,7 +62,8 @@ async function authPlugin(app: FastifyInstance, opts: { secret: string; secureCo
   const challenge = `Bearer resource_metadata="${opts.appUrl}/.well-known/oauth-protected-resource/mcp"`;
 
   async function authenticateBearer(req: FastifyRequest, reply: FastifyReply) {
-    const sent = req.headers.authorization !== undefined;
+    // error="invalid_token" only for a Bearer credential that failed (RFC 6750 §3.1), not for other schemes.
+    const sent = /^bearer(\s|$)/i.test(req.headers.authorization?.trim() ?? '');
     const token = bearerToken(req.headers.authorization);
     const now = new Date();
     const principal = token ? await authenticateToken(app.db, token, now) : null;

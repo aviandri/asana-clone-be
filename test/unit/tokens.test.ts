@@ -50,6 +50,9 @@ describe('MCP config (SPEC §14 M1, M2)', () => {
       expect(loadConfig({ ...base, MCP_ENABLED: 'true', APP_URL: local }).MCP_ENABLED, local).toBe(true);
     }
     expect(loadConfig({ ...base, APP_URL: 'http://project.example.com' }).APP_URL, 'fine with MCP off').toBe('http://project.example.com');
+    const production = { ...base, NODE_ENV: 'production', MCP_ENABLED: 'true' };
+    expect(() => loadConfig({ ...production, APP_URL: 'http://localhost:8080' }), 'no localhost exception in production').toThrow(/APP_URL/);
+    expect(loadConfig({ ...production, APP_URL: 'https://project.example.com' }).MCP_ENABLED).toBe(true);
   });
 
   it('trusts one proxy hop by default', () => {

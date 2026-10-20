@@ -10,10 +10,10 @@ function isValidTimeZone(tz: string) {
   }
 }
 
-/** https, or plain http on a loopback host (dev and tests). */
-function isSecureOrLocal(url: string) {
+/** https, or (outside production) plain http on a loopback host for dev and tests. */
+function isSecureOrLocal(url: string, production: boolean) {
   const u = new URL(url);
-  return u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname));
+  return u.protocol === 'https:' || (!production && u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname));
 }
 
 const envBool = (fallback: boolean) =>
@@ -70,8 +70,8 @@ const EnvSchema = z.object({
   /** The MCP server, its OAuth endpoints and personal access tokens (SPEC §14). Needs an https APP_URL. */
   MCP_ENABLED: envBool(false),
 })
-  .refine((c) => !c.MCP_ENABLED || isSecureOrLocal(c.APP_URL), {
-    message: 'MCP_ENABLED needs an https APP_URL (http only for localhost / 127.0.0.1)',
+  .refine((c) => !c.MCP_ENABLED || isSecureOrLocal(c.APP_URL, c.NODE_ENV === 'production'), {
+    message: 'MCP_ENABLED needs an https APP_URL (http only for localhost / 127.0.0.1, and not in production)',
     path: ['APP_URL'],
   })
   .refine((c) => !(c.NODE_ENV === 'production' && c.LINK_PREVIEW_ALLOW_PRIVATE), {
