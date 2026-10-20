@@ -774,7 +774,7 @@ ApiToken      id, userId (cascade), name, source, scope, prefix (first 12 chars 
               oauthFamily? (OAuth: the OAuthRefresh.family this access token belongs to),
               createdAt, lastUsedAt?, expiresAt?, revokedAt?
               @@index([userId, revokedAt])
-OAuthClient   id, clientId (unique, random), name (client_name, ≤100), redirectUris (string[]),
+OAuthClient   id, clientId (unique: random for DCR, the URL for CIMD), source (DCR|CIMD), name (client_name, ≤100), redirectUris (string[]),
               createdAt, lastUsedAt?
 OAuthCode     id, codeHash (unique), clientId, userId, redirectUri, codeChallenge, scope, resource,
               expiresAt (now + 60 s), usedAt?
@@ -1024,3 +1024,20 @@ admin or invites, or file upload and download.
   with the consent PR. The preview `serve.mjs` is done by platform. The consent page also refuses to render its
   buttons when framed (JS frame-bust), as a fallback where the header is missing. The setup snippet shows
   the env-var form `--header "Authorization: Bearer $MEKARI_PROJECT_TOKEN"` alongside the inline one.
+- **M11** **CIMD** (Client ID Metadata Documents) as well as DCR. Claude prefers it, and without it every fresh
+  claude.ai connection registers a new client. AS metadata adds `client_id_metadata_document_supported: true`
+  (`token_endpoint_auth_methods_supported` already has `"none"`). A `client_id` that is an `https://` URL
+  is fetched with the §13 SSRF-safe fetcher (≤ 5 s, ≤ 64 KB JSON, no redirects across hosts) and must contain a
+  `client_id` equal to that URL, plus `client_name` and `redirect_uris`. It's cached for 24 h (keyed by URL; a
+  fetch failure uses a cached copy < 7 d old, else `invalid_client`). It's stored as an `OAuthClient` with
+  `source: CIMD`, and the consent page shows `client_name` **and the client_id host**. DCR stays for
+  other clients. DCR clients that never got a token are pruned after **24 h** (others after 30 d unused).
+- **M12** Redirect URI matching: exact, **except loopback**. `http://localhost` and `http://127.0.0.1` match
+  with the **port ignored** (scheme, host and path still exact), per RFC 8252 §7.3 and Claude Code's CIMD
+  (`http://localhost/callback`, `http://127.0.0.1/callback`). The consent page shows the redirect host,
+  plus a warning ("a local app on this computer") when the redirect is loopback.
+- **M13** The `/mcp` Origin allowlist also includes `https://claude.com` and `https://*.claude.com`, because the
+  hosted callback may move to `https://claude.com/api/mcp/auth_callback`. Claude's egress is
+  `160.79.104.0/21`, so don't firewall it. The OAuth endpoints must answer in ≪ 10 s, and `/oauth/token`
+  refresh failures are always `invalid_grant`. Scopes stay `read`/`write`, with no `offline_access`, and refresh
+  tokens are always issued. Source: https://claude.com/docs/connectors/building/authentication
