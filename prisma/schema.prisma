@@ -533,6 +533,7 @@ model ApiToken {
 
   @@index([userId, revokedAt])
   @@index([oauthFamily])
+  @@index([oauthClientId])
 }
 
 /// A registered OAuth client: by dynamic registration (DCR) or a client ID metadata document (CIMD, M11).
@@ -571,6 +572,8 @@ model OAuthRequest {
 
   client OAuthClient @relation(fields: [clientId], references: [id], onDelete: Cascade)
   user   User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([clientId])
 }
 
 /// An authorization code (60 s, single use). `family` is set on exchange, so a reused code can revoke what it issued.
@@ -592,6 +595,7 @@ model OAuthCode {
   user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([clientId])
 }
 
 /// A rotating refresh token (30 d). One family per grant; reuse after rotation revokes the family (M20).
@@ -613,4 +617,5 @@ model OAuthRefresh {
 
   @@index([family])
   @@index([userId, revokedAt])
+  @@index([clientId])
 }

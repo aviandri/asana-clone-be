@@ -127,8 +127,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       throw new AppError('NOT_FOUND', 'The MCP server is not available yet');
     });
   } else {
-    // Feature off: a plain 404, not the 401 an unknown route gets without a session.
-    app.post('/mcp', { config: { public: true } }, async () => {
+    // Feature off: a plain 404 for every method, not the 401 an unknown route gets without a session.
+    app.all('/mcp', { config: { public: true } }, async () => {
       throw new AppError('NOT_FOUND', 'MCP is not enabled on this server');
     });
   }

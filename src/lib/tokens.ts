@@ -109,12 +109,14 @@ export async function revokeToken(db: PrismaClient, userId: string, id: string, 
   });
 }
 
-/** A password change (M17): every token, grant, unused code and pending request of the user goes. */
+/**
+ * A password change (M17): every token, grant and unused code of the user goes. Pending authorization
+ * requests aren't bound to a user until the decision (M7), and a decided one lives on only as its code.
+ */
 export async function revokeEverything(db: Db, userId: string, now: Date) {
   await db.apiToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: now } });
   await db.oAuthRefresh.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: now } });
   await db.oAuthCode.deleteMany({ where: { userId, usedAt: null } });
-  await db.oAuthRequest.deleteMany({ where: { userId, decidedAt: null } });
 }
 
 // --- bearer authentication (only on /mcp) ---------------------------------------------------------

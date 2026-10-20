@@ -210,8 +210,10 @@ describe('personal access tokens', () => {
     expect((await api(alice, 'POST', '/me/tokens', { name: 'x', scope: 'READ' }, off)).statusCode).toBe(404);
     expect((await api(alice, 'GET', '/me/tokens', undefined, off)).json().data).toHaveLength(1);
     expect((await api(alice, 'DELETE', `/me/tokens/${row.id}`, undefined, off)).statusCode).toBe(204);
-    const disabled = await off.inject({ method: 'POST', url: '/mcp', headers: bearer(pat.token) });
-    expect([disabled.statusCode, disabled.json().error.message]).toEqual([404, 'MCP is not enabled on this server']);
+    for (const method of ['POST', 'GET', 'DELETE'] as const) {
+      const disabled = await off.inject({ method, url: '/mcp', headers: bearer(pat.token) });
+      expect([disabled.statusCode, disabled.json().error.message], method).toEqual([404, 'MCP is not enabled on this server']);
+    }
   });
 });
 
@@ -220,11 +222,17 @@ describe('bearer auth: only on /mcp', () => {
     const none = await mcp();
     expect(none.statusCode).toBe(401);
     expect(none.headers['www-authenticate']).toBe(CHALLENGE);
-    for (const authorization of ['Bearer nope', `Bearer ${generateToken('mpat').token}`, 'Basic dTpw', 'Bearer']) {
+    for (const authorization of ['Bearer nope', `Bearer ${generateToken('mpat').token}`, `bearer ${generateToken('mpoa').token}`, 'Bearer']) {
       const res = await mcp({ authorization });
       expect(res.statusCode, authorization).toBe(401);
       expect(res.headers['www-authenticate'], authorization).toBe(`${CHALLENGE}, error="invalid_token"`);
       expect(res.json().error.code).toBe('UNAUTHORIZED');
+    }
+    // Another scheme is no Bearer credential at all (RFC 6750 §3.1): the plain challenge.
+    for (const authorization of ['Basic dTpw', 'Bearerx abc', 'Token abc']) {
+      const res = await mcp({ authorization });
+      expect(res.statusCode, authorization).toBe(401);
+      expect(res.headers['www-authenticate'], authorization).toBe(CHALLENGE);
     }
   });
 
@@ -281,7 +289,7 @@ describe('bearer auth: only on /mcp', () => {
 });
 
 describe('a password change revokes every token and grant (M17)', () => {
-  it('revokes PATs, OAuth families, unused codes and pending requests; a name change does not', async () => {
+  it('revokes PATs, OAuth families and unused codes; a name change does not', async () => {
     const alice = await signedIn(app);
     const bob = await signedIn(app);
     const pat = await createPat(alice);
@@ -290,9 +298,6 @@ describe('a password change revokes every token and grant (M17)', () => {
     const code = generateToken('mpor');
     await prisma.oAuthCode.create({
       data: { codeHash: code.hash, clientId: grant.client.id, userId: alice.user.id, redirectUri: 'https://claude.ai/cb', codeChallenge: 'x', scope: 'WRITE', resource: `${APP_URL}/mcp`, expiresAt: new Date(Date.now() + 60_000) },
-    });
-    await prisma.oAuthRequest.create({
-      data: { clientId: grant.client.id, redirectUri: 'https://claude.ai/cb', codeChallenge: 'x', scope: 'WRITE', resource: `${APP_URL}/mcp`, expiresAt: new Date(Date.now() + 600_000), userId: alice.user.id },
     });
 
     expect((await api(alice, 'PATCH', '/users/me', { name: 'Alice B' })).statusCode).toBe(200);
@@ -303,7 +308,6 @@ describe('a password change revokes every token and grant (M17)', () => {
     for (const token of [pat.token, grant.accessToken]) expect((await mcp(bearer(token))).statusCode).toBe(401);
     expect(await prisma.oAuthRefresh.count({ where: { userId: alice.user.id, revokedAt: null } })).toBe(0);
     expect(await prisma.oAuthCode.count({ where: { userId: alice.user.id } })).toBe(0);
-    expect(await prisma.oAuthRequest.count({ where: { userId: alice.user.id } })).toBe(0);
     expect((await api(alice, 'GET', '/me/tokens')).json().data).toEqual([]);
     expect((await mcp(bearer(bobs.token))).statusCode, 'other users keep theirs').toBe(404);
 
