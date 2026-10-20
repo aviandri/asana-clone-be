@@ -4,7 +4,7 @@ import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { User } from '@prisma/client';
 import { AppError, forbidden, unauthorized } from '../errors.js';
-import { INTERNAL_HEADER, isInternal, takeTicket } from '../mcp/internal.js';
+import { INTERNAL_HEADER, INTERNAL_ROUTES, isInternal, takeTicket } from '../mcp/internal.js';
 import { authenticateToken, bearerToken, UsageThrottle, type Principal } from '../lib/tokens.js';
 import type { Member } from '../lib/workspaces.js';
 
@@ -90,6 +90,8 @@ async function authPlugin(app: FastifyInstance, opts: { secret: string; secureCo
     const claim = takeTicket(req.headers[INTERNAL_HEADER], isInternal(req.raw));
     if (!claim) throw new AppError('VALIDATION', 'Unexpected internal header');
     if (!req.url.startsWith('/api/v1/')) throw new AppError('VALIDATION', 'Unexpected internal header');
+    // Only the routes the tools use, whatever the scope (M33).
+    if (!INTERNAL_ROUTES.has(`${req.method} ${req.routeOptions.url}`)) throw forbidden('not available through MCP');
     if (claim.scope === 'READ' && req.method !== 'GET') throw forbidden('this token is read-only');
     const user = await app.db.user.findUnique({ where: { id: claim.userId } });
     if (!user || !user.isActive) throw unauthorized('Session expired or invalid');

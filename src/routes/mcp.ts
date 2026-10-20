@@ -60,12 +60,11 @@ export default async function mcpRoutes(app: FastifyInstance, opts: { version: s
       { name: 'mekari-project', title: 'Mekari Project', version: opts.version },
       { instructions: INSTRUCTIONS },
     );
-    registerTools(server, ctx, (entry) =>
-      req.log.info(
-        { via: 'mcp', tokenId: principal.token.id, source: principal.token.source, client: principal.token.client?.name ?? null, userId: principal.user.id, ...entry },
-        'MCP tool call',
-      ),
-    );
+    registerTools(server, ctx, (entry) => {
+      const line = { via: 'mcp', tokenId: principal.token.id, source: principal.token.source, client: principal.token.client?.name ?? null, userId: principal.user.id, ...entry };
+      if (entry.err !== undefined) req.log.error(line, 'MCP tool call failed');
+      else req.log.info(line, 'MCP tool call');
+    });
     if (principal.token.scope !== 'WRITE') refuseWriteTools(server);
     // Stateless (no Mcp-Session-Id), plain JSON responses (M24).
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

@@ -1,8 +1,8 @@
 import type { AddressInfo } from 'node:net';
 import { Writable } from 'node:stream';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { User } from '@prisma/client';
+import { PrismaClient, type User } from '@prisma/client';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { buildApp } from '../src/app.js';
@@ -221,6 +221,39 @@ describe('the /mcp endpoint', () => {
     await withTicket({ userId: alice.user.id, tokenId: 'x', scope: 'WRITE', client: null }, async (ticket) => {
       expect(takeTicket(ticket, true, Date.now() + 31_000), 'expired after 30 s').toBeNull();
     });
+    // The marker is the socket's own address: a forwarded-for header can't fake it.
+    await prisma.user.update({ where: { id: alice.user.id }, data: { isActive: true } });
+    await withTicket({ userId: alice.user.id, tokenId: 'x', scope: 'WRITE', client: null }, async (ticket) => {
+      const spoofed = await fetch(new URL('/api/v1/auth/me', base), { headers: { 'x-mcp-internal-ticket': ticket, 'x-forwarded-for': INTERNAL_REMOTE } });
+      expect(spoofed.status).toBe(400);
+    });
+  });
+
+  it('opens only the routes the tools use, even to a WRITE ticket (M33)', async () => {
+    const alice = await signedIn(app, { role: 'ADMIN' });
+    const ws = alice.user.lastWorkspaceId!;
+    const attempt = (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, payload?: object) =>
+      withTicket({ userId: alice.user.id, tokenId: 'x', scope: 'WRITE', client: null }, (ticket) =>
+        app.inject({ method, url: `/api/v1${url}`, remoteAddress: INTERNAL_REMOTE, headers: { 'x-mcp-internal-ticket': ticket }, payload }),
+      );
+    for (const [method, url, payload] of [
+      ['POST', '/me/tokens', { name: 'stolen', scope: 'WRITE' }],
+      ['GET', '/me/tokens'],
+      ['PATCH', '/users/me', { name: 'x' }],
+      ['GET', '/admin/users'],
+      ['POST', '/admin/invites', { email: 'x@example.com' }],
+      ['POST', '/auth/logout'],
+      ['GET', `/workspaces/${ws}/members`],
+      ['PATCH', `/workspaces/${ws}`, { name: 'x' }],
+      ['GET', `/oauth/requests/${ws}`],
+      ['DELETE', `/tasks/${ws}`],
+      ['GET', '/config'],
+    ] as const) {
+      const res = await attempt(method, url, payload);
+      expect([res.statusCode, res.json().error?.message], `${method} ${url}`).toEqual([403, 'not available through MCP']);
+    }
+    expect(await prisma.apiToken.count(), 'no token minted').toBe(0);
+    expect((await attempt('GET', '/auth/me')).statusCode, 'the one /auth route the tools read').toBe(200);
   });
 });
 
@@ -233,7 +266,9 @@ describe('audit log', () => {
         done();
       },
     });
-    const logged = await buildApp({ config: { ...loadConfig(), APP_URL, MCP_ENABLED: true }, prisma, logger: { level: 'info', stream } });
+    // Its own client: the failure below is injected by mocking it, which must not leak into other tests.
+    const ownDb = new PrismaClient();
+    const logged = await buildApp({ config: { ...loadConfig(), APP_URL, MCP_ENABLED: true }, prisma: ownDb, logger: { level: 'info', stream } });
     try {
       await logged.listen({ port: 0, host: '127.0.0.1' });
       const user = await createUser();
@@ -247,16 +282,30 @@ describe('audit log', () => {
       );
       await client.callTool({ name: 'whoami', arguments: {} });
       await client.callTool({ name: 'get_task', arguments: { taskId: '00000000-0000-4000-8000-000000000000' } });
+      await client.callTool({ name: 'list_people', arguments: { query: 'needle-in-the-log' } });
+      // An unexpected failure (here the database) is logged, and the model sees only INTERNAL (M33).
+      const team = await prisma.team.create({ data: { workspaceId: user.lastWorkspaceId!, name: 'T' } });
+      const project = await prisma.project.create({
+        data: { workspaceId: user.lastWorkspaceId!, teamId: team.id, ownerId: user.id, name: 'P', color: '#4186e0', privacy: 'PUBLIC' },
+      });
+      vi.spyOn(ownDb.task, 'groupBy').mockRejectedValue(new Error('db exploded: secret detail'));
+      const broken = (await client.callTool({ name: 'get_project', arguments: { projectId: project.id } })) as { isError: boolean; content: { text: string }[] };
+      expect([broken.isError, broken.content[0]!.text]).toEqual([true, 'INTERNAL: something went wrong']);
       await client.close();
       const calls = lines.filter((l) => l.msg === 'MCP tool call');
       expect(calls).toEqual([
         expect.objectContaining({ via: 'mcp', tokenId: row.id, source: 'PAT', client: null, userId: user.id, tool: 'whoami', ok: true, ms: expect.any(Number) }),
         expect.objectContaining({ via: 'mcp', tool: 'get_task', ok: false }),
+        expect.objectContaining({ via: 'mcp', tool: 'list_people', ok: true }),
       ]);
+      const failed = lines.filter((l) => l.msg === 'MCP tool call failed');
+      expect(failed).toEqual([expect.objectContaining({ via: 'mcp', tool: 'get_project', ok: false, err: expect.objectContaining({ message: 'db exploded: secret detail' }) })]);
+      expect(JSON.stringify(lines), 'injected REST calls are logged without their query').not.toContain('needle-in-the-log');
       expect(JSON.stringify(lines), 'the token never reaches the log').not.toContain(token.slice(5));
     } finally {
       logged.server.closeAllConnections();
       await logged.close();
+      await ownDb.$disconnect();
     }
   });
 });
@@ -375,6 +424,8 @@ describe('read tools', () => {
     });
     expect(detail.subtasks).toEqual([expect.objectContaining({ id: sub.id, url: `${APP_URL}/projects/${w.launch.id}/list?task=${sub.id}&workspace=${w.ws}` })]);
     expect(detail.comments).toEqual([expect.objectContaining({ body: 'First!', author: { id: w.alice.user.id, name: 'Alice' }, attachmentNames: [] })]);
+    expect((await ok(alice, 'get_task', { taskId: sub.id })).task.parent).toEqual({ id: w.t1.id, title: 'Write the plan', url: detail.url });
+    expect((await ok(alice, 'get_project', { projectId: w.launch.id })).project.members[0]).toMatchObject({ url: null });
 
     const personal = (await ok(alice, 'get_task', { taskId: w.personal.id })).task;
     expect(personal.url).toBe(`${APP_URL}/my-tasks?task=${w.personal.id}&workspace=${w.ws}`);
@@ -430,6 +481,8 @@ describe('read tools', () => {
     const w = await world();
     const goal = await api(w.alice, 'POST', '/goals', { title: 'Ship it', timePeriod: '2026' });
     await api(w.alice, 'POST', `/goals/${goal.id}/key-results`, { title: 'Users', metricType: 'NUMBER', targetValue: 100 });
+    await api(w.alice, 'POST', '/goals', { title: 'Grow', timePeriod: '2026' });
+    await prisma.team.create({ data: { workspaceId: w.ws, name: 'Ops' } });
     const alice = await connect(await pat(w.alice.user));
     const results = {
       whoami: await ok(alice, 'whoami'),
@@ -449,8 +502,20 @@ describe('read tools', () => {
       list_notifications: await ok(alice, 'list_notifications', { unreadOnly: false }),
     };
     expect(Object.keys(results).sort()).toEqual(READ_TOOLS().sort());
-    expect(results.list_teams.teams).toEqual([expect.objectContaining({ name: 'Eng', isMember: true, url: `${APP_URL}/teams/${w.team.id}?workspace=${w.ws}` })]);
-    expect(results.list_people.people).toEqual([expect.objectContaining({ email: 'bob@example.com' })]);
+    expect(results.list_teams.teams).toEqual([
+      expect.objectContaining({ name: 'Eng', isMember: true, url: `${APP_URL}/teams/${w.team.id}?workspace=${w.ws}` }),
+      expect.objectContaining({ name: 'Ops', isMember: false }),
+    ]);
+    expect(results.list_people.people).toEqual([expect.objectContaining({ email: 'bob@example.com', url: null })]);
+    // Every list pages (M33).
+    for (const [tool, key] of [['list_projects', 'projects'], ['list_people', 'people'], ['list_teams', 'teams'], ['list_goals', 'goals']] as const) {
+      const all = await ok(alice, tool, {});
+      expect(all.nextCursor, tool).toBeNull();
+      expect(all[key].length, `${tool} needs two rows to page`).toBeGreaterThanOrEqual(2);
+      const first = await ok(alice, tool, { limit: 1 });
+      expect([first[key].length, typeof first.nextCursor], tool).toEqual([1, 'string']);
+      expect((await ok(alice, tool, { limit: 1, cursor: first.nextCursor }))[key][0].id, tool).toBe(all[key][1].id);
+    }
     expect(results.get_goal.goal).toMatchObject({ title: 'Ship it', url: `${APP_URL}/goals/${goal.id}?workspace=${w.ws}`, keyResults: [expect.objectContaining({ title: 'Users' })] });
     expect(results.workload.url).toBe(`${APP_URL}/reporting?workspace=${w.ws}`);
     expect(results.list_notifications.url).toBe(`${APP_URL}/inbox?workspace=${w.ws}`);
@@ -515,7 +580,9 @@ describe('write tools', () => {
     const order = (await ok(alice, 'get_project', { projectId: p.id })).project.sections.map((x: { name: string }) => x.name);
     expect(order).toEqual(['To do', 'In progress', 'QA', 'Done']);
     await fails(alice, 'create_section', { projectId: p.id, name: 'x', afterSectionId: w.launch.sections[0].id }, 'NOT_FOUND: afterSectionId');
-    await fails(alice, 'update_project', { projectId: p.id, archived: true } as never, 'VALIDATION');
+    // Fields the tool doesn't take are dropped, never passed through to REST.
+    expect((await ok(alice, 'update_project', { projectId: p.id, name: 'Roadmap 2', archived: true, privacy: 'PRIVATE' })).project.name).toBe('Roadmap 2');
+    expect(await prisma.project.findUniqueOrThrow({ where: { id: p.id } })).toMatchObject({ archived: false, privacy: 'TEAM' });
   });
 
   it('goal updates, key results and notifications', async () => {
@@ -531,8 +598,10 @@ describe('write tools', () => {
     await api(w.bob, 'POST', `/tasks/${w.t1.id}/comments`, { body: `ping @[Alice](${w.alice.user.id})` });
     const inbox = await ok(alice, 'list_notifications');
     expect(inbox.unreadCount).toBeGreaterThan(0);
-    expect((await ok(alice, 'mark_notifications_read', { ids: [inbox.notifications[0].id] })).marked).toBe(1);
-    expect((await ok(alice, 'mark_notifications_read')).marked).toBe('all');
+    expect(await ok(alice, 'mark_notifications_read', { ids: [inbox.notifications[0].id] })).toEqual({ marked: 1, workspaceIds: [w.ws] });
+    const elsewhere = await prisma.notification.create({ data: { workspaceId: w.other.id, userId: w.alice.user.id, actorId: w.bob.user.id, type: 'COMMENTED' } });
+    expect(await ok(alice, 'mark_notifications_read', { ids: [elsewhere.id] }), 'its own workspace, not the current one').toEqual({ marked: 1, workspaceIds: [w.other.id] });
+    expect(await ok(alice, 'mark_notifications_read')).toEqual({ marked: 'all', workspaceIds: [w.ws] });
     expect((await ok(alice, 'list_notifications')).unreadCount).toBe(0);
   });
 });
