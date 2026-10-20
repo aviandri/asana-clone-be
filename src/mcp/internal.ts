@@ -15,6 +15,44 @@ export const INTERNAL_HEADER = 'x-mcp-internal-ticket';
 export const INTERNAL_REMOTE = 'mcp-internal';
 const TTL_MS = 30_000;
 
+/**
+ * The only routes a ticket opens (M33): exactly what the tools call. Tokens, passwords, admin, invites,
+ * memberships, OAuth and login stay out of reach even of a WRITE token. GET /auth/me is the one /auth
+ * route: the caller's own profile and workspaces (whoami and the workspace default).
+ */
+export const INTERNAL_ROUTES: ReadonlySet<string> = new Set([
+  'GET /api/v1/auth/me',
+  'GET /api/v1/teams',
+  'GET /api/v1/users',
+  'GET /api/v1/projects',
+  'GET /api/v1/projects/:id',
+  'GET /api/v1/projects/:id/tasks',
+  'GET /api/v1/projects/:id/report',
+  'GET /api/v1/me/tasks',
+  'GET /api/v1/tasks/:id',
+  'GET /api/v1/tasks/:id/stories',
+  'GET /api/v1/search',
+  'GET /api/v1/goals',
+  'GET /api/v1/goals/:id',
+  'GET /api/v1/goals/:id/updates',
+  'GET /api/v1/reports/workload',
+  'GET /api/v1/notifications',
+  'POST /api/v1/tasks',
+  'PATCH /api/v1/tasks/:id',
+  'POST /api/v1/tasks/:id/comments',
+  'POST /api/v1/tasks/:id/attachments/link',
+  'POST /api/v1/tasks/:id/followers',
+  'DELETE /api/v1/tasks/:id/followers/:userId',
+  'POST /api/v1/projects',
+  'PATCH /api/v1/projects/:id',
+  'POST /api/v1/projects/:id/sections',
+  'PATCH /api/v1/sections/:id',
+  'POST /api/v1/goals/:id/updates',
+  'PATCH /api/v1/key-results/:id',
+  'POST /api/v1/notifications/read-all',
+  'POST /api/v1/notifications/:id/read',
+]);
+
 export type TicketClaim = { userId: string; tokenId: string; scope: TokenScope; client: string | null };
 
 const tickets = new Map<string, TicketClaim & { expiresAt: number }>();
@@ -38,7 +76,7 @@ export async function withTicket<T>(claim: TicketClaim, fn: (ticket: string) => 
 
 /** Was this request injected by `rest` (and not received from the network)? */
 export function isInternal(raw: IncomingMessage): boolean {
-  return raw.socket?.remoteAddress === INTERNAL_REMOTE;
+  return raw?.socket?.remoteAddress === INTERNAL_REMOTE;
 }
 
 /**

@@ -294,8 +294,8 @@ tool({
   title: 'List teams',
   description: 'Teams in a workspace, with member counts and whether you are a member.',
   write: false,
-  input: { workspaceId: workspaceIdInput },
-  output: { ...wsOut, teams: z.array(loose({ id: z.string(), name: z.string(), memberCount: z.number(), isMember: z.boolean(), url: z.string() })) },
+  input: { workspaceId: workspaceIdInput, limit: limitInput, cursor: cursorInput },
+  output: { ...wsOut, teams: z.array(loose({ id: z.string(), name: z.string(), memberCount: z.number(), isMember: z.boolean(), url: z.string() })), nextCursor: z.string().nullable() },
   run: async (ctx, a) => {
     const ws = await workspaceOf(ctx, a.workspaceId);
     const urls = new Urls(ctx.app.config.APP_URL);
@@ -304,8 +304,9 @@ tool({
       rest<{ data: { id: string }[] }>(ctx, 'GET', '/teams', { workspaceId: ws, query: { mine: true } }),
     ]);
     const member = new Set(mine.data.map((t) => t.id));
-    const teams = all.data.map((t) => ({ id: t.id, name: t.name, memberCount: t.memberCount, isMember: member.has(t.id), url: urls.team(t.id, ws) }));
-    return { result: { workspaceId: ws, teams }, summary: `${teams.length} team(s)` };
+    const { slice, nextCursor } = page(all.data, a.limit, a.cursor);
+    const teams = slice.map((t) => ({ id: t.id, name: t.name, memberCount: t.memberCount, isMember: member.has(t.id), url: urls.team(t.id, ws) }));
+    return { result: { workspaceId: ws, teams, nextCursor }, summary: `${teams.length} of ${all.data.length} team(s)` };
   },
 });
 
@@ -314,13 +315,15 @@ tool({
   title: 'List people',
   description: 'Active people in a workspace you can assign or mention (name, email, role). Filter with query (name or email).',
   write: false,
-  input: { workspaceId: workspaceIdInput, query: z.string().max(100).optional() },
-  output: { ...wsOut, people: z.array(loose({ id: z.string(), name: z.string(), email: z.string(), role: z.string() })) },
+  input: { workspaceId: workspaceIdInput, query: z.string().max(100).optional(), limit: limitInput, cursor: cursorInput },
+  output: { ...wsOut, people: z.array(loose({ id: z.string(), name: z.string(), email: z.string(), role: z.string(), url: z.null() })), nextCursor: z.string().nullable() },
   run: async (ctx, a) => {
     const ws = await workspaceOf(ctx, a.workspaceId);
     const res = await rest<{ data: (UserSummary & { role: string })[] }>(ctx, 'GET', '/users', { workspaceId: ws, query: { q: a.query } });
-    const people = res.data.map((u) => ({ id: u.id, name: u.name, email: u.email, role: u.role }));
-    return { result: { workspaceId: ws, people }, summary: `${people.length} people` };
+    const { slice, nextCursor } = page(res.data, a.limit, a.cursor);
+    // People have no page of their own in the app (M6).
+    const people = slice.map((u) => ({ id: u.id, name: u.name, email: u.email, role: u.role, url: null }));
+    return { result: { workspaceId: ws, people, nextCursor }, summary: `${people.length} of ${res.data.length} people` };
   },
 });
 
@@ -344,8 +347,10 @@ tool({
     teamId: id.optional(),
     includeArchived: z.boolean().optional().describe('Also archived projects (default false)'),
     query: z.string().max(100).optional().describe('Part of the project name'),
+    limit: limitInput,
+    cursor: cursorInput,
   },
-  output: { ...wsOut, projects: z.array(ProjectRow) },
+  output: { ...wsOut, projects: z.array(ProjectRow), nextCursor: z.string().nullable() },
   run: async (ctx, a) => {
     const ws = await workspaceOf(ctx, a.workspaceId);
     const urls = new Urls(ctx.app.config.APP_URL);
@@ -354,7 +359,8 @@ tool({
       rest<{ data: RestProject[] }>(ctx, 'GET', '/projects', { workspaceId: ws, query: { ...query, archived: false } }),
       ...(a.includeArchived ? [rest<{ data: RestProject[] }>(ctx, 'GET', '/projects', { workspaceId: ws, query: { ...query, archived: true } })] : []),
     ]);
-    const projects = lists.flatMap((l) => l.data);
+    const all = lists.flatMap((l) => l.data);
+    const { slice: projects, nextCursor } = page(all, a.limit, a.cursor);
     const teams = await rest<{ data: { id: string; name: string }[] }>(ctx, 'GET', '/teams', { workspaceId: ws });
     const teamName = new Map(teams.data.map((t) => [t.id, t.name]));
     const counts = await projectCounts(ctx, projects.map((p) => p.id));
@@ -367,7 +373,7 @@ tool({
       url: urls.project(p.id, ws),
       counts: counts.get(p.id)!,
     }));
-    return { result: { workspaceId: ws, projects: rows }, summary: `${rows.length} project(s)` };
+    return { result: { workspaceId: ws, projects: rows, nextCursor }, summary: `${rows.length} of ${all.length} project(s)` };
   },
 });
 
@@ -384,7 +390,7 @@ tool({
       name: z.string(),
       url: z.string(),
       sections: z.array(z.object({ id: z.string(), name: z.string(), taskCount: z.number() })),
-      members: z.array(z.object({ id: z.string(), name: z.string(), role: z.string() })),
+      members: z.array(z.object({ id: z.string(), name: z.string(), role: z.string(), url: z.null() })),
       counts: z.object({ total: z.number(), completed: z.number(), overdue: z.number() }),
     }),
   },
@@ -410,7 +416,7 @@ tool({
       url: urls.project(p.id, p.workspaceId),
       reportUrl: urls.report(p.id, p.workspaceId),
       sections: p.sections.map((s) => ({ id: s.id, name: s.name, taskCount: sectionCount.get(s.id) ?? 0 })),
-      members: p.members.map((m) => ({ id: m.user.id, name: m.user.name, role: m.role })),
+      members: p.members.map((m) => ({ id: m.user.id, name: m.user.name, role: m.role, url: null })),
       counts: counts.get(p.id)!,
     };
     return { result: { workspaceId: p.workspaceId, project }, summary: `${p.name}: ${project.counts.total} tasks, ${project.sections.length} sections` };
@@ -534,7 +540,8 @@ tool({
       startDate: t.startDate,
       priority: t.priority,
       followers: t.followers.map(person),
-      parent: t.parent,
+      // A subtask shares its parent's project (REST places it there), so the parent's link uses it too.
+      parent: t.parent ? { ...t.parent, url: urls.task({ id: t.parent.id, projectId: t.projectId }, ws) } : null,
       url: self!.url,
       subtasks,
       attachments: t.attachments.map((x) => ({
@@ -610,15 +617,18 @@ tool({
     teamId: id.optional(),
     owner: personInput.optional(),
     query: z.string().max(100).optional(),
+    limit: limitInput,
+    cursor: cursorInput,
   },
-  output: { ...wsOut, goals: z.array(GoalRow) },
+  output: { ...wsOut, goals: z.array(GoalRow), nextCursor: z.string().nullable() },
   run: async (ctx, a) => {
     const ws = await workspaceOf(ctx, a.workspaceId);
     const ownerId = a.owner ? await resolvePerson(ctx, ws, a.owner, 'owner') : undefined;
     const res = await rest<{ data: RestGoal[] }>(ctx, 'GET', '/goals', { workspaceId: ws, query: { timePeriod: a.timePeriod, teamId: a.teamId, ownerId, q: a.query } });
     const urls = new Urls(ctx.app.config.APP_URL);
-    const goals = res.data.map((g) => goalRow(g, urls));
-    return { result: { workspaceId: ws, goals }, summary: `${goals.length} goal(s)` };
+    const { slice, nextCursor } = page(res.data, a.limit, a.cursor);
+    const goals = slice.map((g) => goalRow(g, urls));
+    return { result: { workspaceId: ws, goals, nextCursor }, summary: `${goals.length} of ${res.data.length} goal(s)` };
   },
 });
 
@@ -1026,16 +1036,23 @@ tool({
   description: 'Marks the given notifications read, or (without ids) every notification in the workspace.',
   write: true,
   idempotent: true,
-  input: { ids: z.array(id).min(1).max(100).optional(), workspaceId: workspaceIdInput },
-  output: { ...wsOut, marked: z.union([z.number(), z.literal('all')]) },
+  input: {
+    ids: z.array(id).min(1).max(100).optional().describe('Notification ids, in any of your workspaces'),
+    workspaceId: workspaceIdInput.describe('Without ids: the workspace whose notifications to mark (default: current)'),
+  },
+  output: { workspaceIds: z.array(z.string()), marked: z.union([z.number(), z.literal('all')]) },
   run: async (ctx, a) => {
-    const ws = await workspaceOf(ctx, a.workspaceId);
     if (!a.ids) {
+      const ws = await workspaceOf(ctx, a.workspaceId);
       await rest(ctx, 'POST', '/notifications/read-all', { workspaceId: ws });
-      return { result: { workspaceId: ws, marked: 'all' }, summary: 'All notifications marked read' };
+      return { result: { workspaceIds: [ws], marked: 'all' }, summary: 'All notifications marked read' };
     }
-    for (const n of a.ids) await rest(ctx, 'POST', `/notifications/${n}/read`);
-    return { result: { workspaceId: ws, marked: a.ids.length }, summary: `${a.ids.length} notification(s) marked read` };
+    const ids = [...new Set(a.ids)];
+    for (const n of ids) await rest(ctx, 'POST', `/notifications/${n}/read`);
+    // The workspaces they were in: the caller's own notifications, each just marked through REST.
+    const rows = await ctx.app.db.notification.findMany({ where: { id: { in: ids }, userId: ctx.principal.user.id }, select: { workspaceId: true } });
+    const workspaceIds = [...new Set(rows.map((r) => r.workspaceId))];
+    return { result: { workspaceIds, marked: ids.length }, summary: `${ids.length} notification(s) marked read` };
   },
 });
 
@@ -1071,6 +1088,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, log: (entry: 
       async (args: Record<string, unknown>) => {
         const started = Date.now();
         let ok = false;
+        let failure: unknown;
         let timer: NodeJS.Timeout | undefined;
         try {
           if (t.write && ctx.principal.token.scope !== 'WRITE') throw new ToolError('FORBIDDEN: this token is read-only');
@@ -1082,10 +1100,12 @@ export function registerTools(server: McpServer, ctx: ToolContext, log: (entry: 
           return { content: [{ type: 'text' as const, text: summary }], structuredContent: result };
         } catch (err) {
           if (err instanceof ToolError) return { content: [{ type: 'text' as const, text: err.message }], isError: true };
-          throw err;
+          // Anything else (a database error, a bug) is logged here and never shown to the model raw (M33).
+          failure = err;
+          return { content: [{ type: 'text' as const, text: 'INTERNAL: something went wrong' }], isError: true };
         } finally {
           clearTimeout(timer);
-          log({ tool: t.name, ms: Date.now() - started, ok });
+          log({ tool: t.name, ms: Date.now() - started, ok, ...(failure !== undefined ? { err: failure } : {}) });
         }
       },
     );

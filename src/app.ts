@@ -1,4 +1,5 @@
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from 'fastify';
+import { isInternal } from './mcp/internal.js';
 import rateLimit from '@fastify/rate-limit';
 import type { PrismaClient } from '@prisma/client';
 import type { Config } from './config.js';
@@ -71,9 +72,35 @@ declare module 'fastify' {
   }
 }
 
+/**
+ * Fastify's logger, with one change: an MCP tool's injected REST call logs its path without the query
+ * (search terms and emails stay out of the request log; the tool call itself is logged with via: "mcp").
+ */
+function loggerOptions(logger: AppOptions['logger'], env: string): FastifyServerOptions['logger'] {
+  const enabled = logger ?? env !== 'test';
+  if (enabled === false) return false;
+  const base = enabled === true ? {} : (enabled as Exclude<typeof enabled, boolean>);
+  return {
+    ...(base as object),
+    serializers: {
+      req: (req: FastifyRequest) => {
+        const internal = req.raw ? isInternal(req.raw) : false;
+        return {
+          method: req.method,
+          url: internal ? req.url.split('?')[0] : req.url,
+          hostname: req.hostname,
+          remoteAddress: req.ip,
+          remotePort: req.socket?.remotePort,
+          ...(internal ? { via: 'mcp' } : {}),
+        };
+      },
+    },
+  };
+}
+
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: opts.logger ?? opts.config.NODE_ENV !== 'test',
+    logger: loggerOptions(opts.logger, opts.config.NODE_ENV),
     // Hops, not `true`: with `true` the client's own leftmost X-Forwarded-For entry becomes req.ip (M2).
     trustProxy: opts.config.TRUST_PROXY_HOPS ?? 1,
     // A total cap: nginx streams upload bodies through unbuffered, so a stalled client would otherwise hold a
