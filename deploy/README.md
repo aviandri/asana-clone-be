@@ -175,6 +175,11 @@ The feature is off until you set `MCP_ENABLED=true` in `.env`.
   per-IP rate limits (login, accept-invite, OAuth client registration) then share one bucket:
   have nginx take the real client address from that proxy (e.g. `set_real_ip_from` +
   `real_ip_header CF-Connecting-IP` behind Cloudflare) rather than raising the hop count.
+- **OAuth rate limits:** per client IP, `OAUTH_REGISTER_RATE_LIMIT` client registrations an hour
+  (default 30) and `OAUTH_AUTHORIZE_RATE_LIMIT` authorize requests a minute (default 60).
+  claude.ai identifies itself with a client metadata URL (no registration), but clients that use
+  dynamic registration register on each fresh connection, and Claude's traffic all comes from a
+  few Anthropic addresses: raise the first if many people connect within an hour and see `429`.
 - **Firewalls / WAF:** if anything in front of nginx challenges bots (e.g. Cloudflare Bot Fight
   Mode), exempt `/mcp`, `/oauth/` and `/.well-known/` so Anthropic's servers aren't blocked.
 
