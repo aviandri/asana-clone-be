@@ -24,11 +24,22 @@ function cutToBytes(s: string, bytes: number): string {
   return out;
 }
 
+/**
+ * Text a user sees (filenames, link titles): lone surrogates (not valid UTF-8 for the DB) become U+FFFD,
+ * format characters go, whitespace (tabs, newlines included) collapses to one space, other controls go.
+ */
+export function plainText(raw: string): string {
+  return raw
+    .replace(LONE_SURROGATE, '\uFFFD')
+    .replace(FORMAT, '')
+    .replace(/\s+/g, ' ')
+    .replace(CONTROLS, '')
+    .replace(/ {2,}/g, ' ')
+    .trim();
+}
+
 export function sanitizeFilename(raw: string | undefined | null): string {
-  // Lone surrogates (a broken UTF-16 filename*) become U+FFFD: they aren't valid UTF-8 for the DB.
-  const base = (raw ?? '').replace(LONE_SURROGATE, '\uFFFD').split(/[/\\]/).pop() ?? '';
-  // Format characters go; whitespace (tabs, newlines included) collapses to one space; other controls go.
-  const name = base.replace(FORMAT, '').replace(/\s+/g, ' ').replace(CONTROLS, '').replace(/ {2,}/g, ' ').trim();
+  const name = plainText((raw ?? '').split(/[/\\]/).pop() ?? '');
   if (name === '' || name === '.' || name === '..') return 'file';
   if (utf8Length(name) <= MAX_BYTES) return name;
   // Too long: keep the extension (if it's a sensible one) and shorten the stem.

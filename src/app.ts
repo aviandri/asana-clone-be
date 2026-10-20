@@ -22,6 +22,7 @@ import workspaceRoutes from './routes/workspaces.js';
 import attachmentRoutes from './routes/attachments.js';
 import { sweepAttachments } from './lib/attachments.js';
 import { DiskStorage, type StorageDriver } from './lib/storage.js';
+import { defaultPolicy, permissivePolicy, type FetchPolicy } from './lib/link-preview.js';
 
 export type AppOptions = {
   config: Pick<
@@ -36,7 +37,10 @@ export type AppOptions = {
     | 'MAX_UPLOAD_BYTES'
     | 'UPLOAD_RATE_LIMIT_MAX'
     | 'STORAGE_MIN_FREE_BYTES'
-  > & { REQUEST_TIMEOUT_MS?: number };
+  > &
+    Partial<Pick<Config, 'REQUEST_TIMEOUT_MS' | 'LINK_PREVIEW_ENABLED' | 'LINK_PREVIEW_ALLOW_PRIVATE'>>;
+  /** The link-preview fetcher's network policy (tests); default from LINK_PREVIEW_ALLOW_PRIVATE. */
+  fetchPolicy?: FetchPolicy;
   prisma?: PrismaClient;
   logger?: boolean;
   /** Attachment storage; default: the disk driver under STORAGE_DIR. */
@@ -53,6 +57,7 @@ declare module 'fastify' {
   interface FastifyInstance {
     config: AppOptions['config'];
     storage: StorageDriver;
+    fetchPolicy: FetchPolicy;
   }
 }
 
@@ -67,6 +72,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   app.decorate('config', opts.config);
   app.decorate('storage', opts.storage ?? new DiskStorage(opts.config.STORAGE_DIR));
+  app.decorate(
+    'fetchPolicy',
+    opts.fetchPolicy ?? (opts.config.LINK_PREVIEW_ALLOW_PRIVATE ? permissivePolicy : defaultPolicy),
+  );
   app.setErrorHandler(errorHandler);
   app.setNotFoundHandler((req, reply) => {
     errorHandler(new AppError('NOT_FOUND', `Route ${req.method} ${req.url} not found`), req, reply);

@@ -670,19 +670,23 @@ Attachment  id, workspaceId, taskId (cascade), commentId? (cascade), uploaderId 
 ### Link previews (SSRF-safe fetcher)
 - Only `http`/`https`, ports 80/443. Resolve DNS **once** and connect to that pinned IP; reject
   loopback, private (RFC 1918), link-local (incl. 169.254.169.254), CGNAT 100.64/10, `0.0.0.0/8`,
-  multicast, broadcast, IPv6 `::1`, `fc00::/7`, `fe80::/10`, IPv4-mapped forms of all of these.
+  multicast, broadcast, IPv4-mapped forms of all of these. IPv6: global unicast `2000::/3` only, minus
+  `2001::/23` (incl. Teredo), `2002::/16` (6to4) and documentation ranges (so no `::1`, `fc00::/7`,
+  `fe80::/10`, NAT64, SIIT or IPv4-compatible forms).
   Max **3 redirects**, each re-validated. Total budget 6 s; HTML read capped at **1 MB**
   (only `text/html`/`application/xhtml+xml`); no cookies or auth sent; UA `MekariProjectBot/1.0`.
   Env **`LINK_PREVIEW_ENABLED`** (default true) turns fetching off (→ `FAILED`, cards still work);
   **`LINK_PREVIEW_ALLOW_PRIVATE`** (default false) only for tests.
 - Parse `og:title|description|site_name|image`, `twitter:*`, `<title>`, `<link rel=icon>`, falling
-  back to `/favicon.ico`. Strip tags/controls; title ≤ 300, description ≤ 1000 chars. `og:image`
+  back to `/favicon.ico`, from the head only (up to `</head>`, ≤ 256 KB) with a linear parser.
+  Strip tags/controls; title ≤ 300, description ≤ 1000 chars. `og:image`
   and icon fetched under the same rules (≤ 5 MB, raster image types only, re-encoded by sharp to
   WebP ≤ 1200 px / 64 px), stored as `imageKey`/`iconKey`.
 - `provider` (from the final hostname; clients bundle the icons; open string — unknown = generic):
   `google_drive`, `google_docs`, `google_sheets`, `google_slides`, `dropbox`, `onedrive`
   (incl. SharePoint), `box`, `figma`, `youtube`, `loom`, `github`, `gitlab`, `notion`, `miro`,
-  `jira`, `confluence`, `slack`, `zoom`. User-entered `title` wins over the fetched one.
+  `jira`, `confluence`, `slack`, `zoom`. User-entered `title` wins over the fetched one (cleaned like a
+  filename). A refresh that fails leaves the previous preview untouched.
 
 ### Shape
 ```ts
