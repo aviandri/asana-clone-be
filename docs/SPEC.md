@@ -1090,3 +1090,10 @@ admin or invites, or file upload and download.
   already used"). `409` is only for a second **decision**.
 - **M31** CIMD clients are only a cache of their document. They count against the 1000-client cap and are pruned when
   they've had no token for 24 h, like DCR clients.
+- **M32** Client caps and pruning (from the PR B review):
+  - CIMD and DCR have **separate caps** of 1000 each. Filling one never blocks the other.
+  - A client with **no token rows, no live request and no live code** is pruned after **1 h** if it's CIMD, and after 24 h if
+    it's DCR.
+  - Pruning **never** deletes a client that has a live request (`expiresAt > now`), an unused live code, or a token.
+  - Authorization codes use the prefix **`mpoc_`**.
+  - Rate-limit and other generic errors on `/oauth/*` use the RFC 6749 `{error, error_description}` shape.
