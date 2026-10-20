@@ -1,0 +1,9 @@
+{
+  "name": "mcp-e2e",
+  "private": true,
+  "description": "SPEC §14 end-to-end check with the official MCP SDK client (CI job `mcp`)",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1"
+  }
+}

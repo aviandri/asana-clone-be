@@ -47,6 +47,9 @@ services:
       LINK_PREVIEW_ENABLED: ${LINK_PREVIEW_ENABLED:-true}
       # The MCP server for Claude (SPEC §14); needs an https APP_URL reachable from the internet.
       MCP_ENABLED: ${MCP_ENABLED:-false}
+      # Per client IP: OAuth client registrations per hour, authorize requests per minute.
+      OAUTH_REGISTER_RATE_LIMIT: ${OAUTH_REGISTER_RATE_LIMIT:-30}
+      OAUTH_AUTHORIZE_RATE_LIMIT: ${OAUTH_AUTHORIZE_RATE_LIMIT:-60}
       # nginx (fe) is the one proxy hop and overwrites X-Forwarded-For.
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
       NODE_ENV: production

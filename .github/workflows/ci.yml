@@ -154,6 +154,95 @@ jobs:
           for f in be.log be-limits.log be-full.log; do echo "::group::$f"; cat "$f" || true; echo "::endgroup::"; done
           echo "::group::nginx"; docker logs nginx 2>&1 | tail -200 || true; echo "::endgroup::"
 
+  mcp:
+    # SPEC §14 end to end: the official MCP SDK client (.github/mcp-e2e, its own pinned deps) does
+    # the real OAuth flows (DCR, CIMD, a random-port loopback redirect, consent via the cookie API,
+    # token, refresh rotation, revoke) through the FE repo's production nginx, as claude.ai would.
+    # CIMD needs an https client_id: the job makes a throwaway CA, serves the metadata document
+    # with it on 127.0.0.1, and the BE trusts it via NODE_EXTRA_CA_CERTS (test-only:
+    # LINK_PREVIEW_ALLOW_PRIVATE, which the BE refuses in production).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: asana
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5433/asana
+      JWT_SECRET: ci-only-secret-at-least-16-chars
+      # The issuer and MCP resource: the nginx origin the client uses. http is allowed for
+      # localhost outside production only, so NODE_ENV must not be production here.
+      APP_URL: http://localhost:8080
+      NODE_ENV: development
+      PORT: "3000"
+      HOST: 0.0.0.0
+      MCP_ENABLED: "true"
+      LINK_PREVIEW_ENABLED: "false"
+      LINK_PREVIEW_ALLOW_PRIVATE: "true"
+      OAUTH_REGISTER_RATE_LIMIT: "1000"
+      OAUTH_AUTHORIZE_RATE_LIMIT: "1000"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            .github/mcp-e2e/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix .github/mcp-e2e
+      - run: npx prisma migrate deploy
+      - run: npm run build
+      - run: npm run seed
+      - name: Test CA for the CIMD metadata server
+        run: .github/mcp-e2e/gen-test-ca.sh "$RUNNER_TEMP/tls"
+      - name: Start backend
+        run: |
+          export STORAGE_DIR="$RUNNER_TEMP/attachments"
+          NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/tls/ca.pem" nohup npm start > be.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3000/health >/dev/null && exit 0; sleep 1; done
+          echo "backend did not become healthy"; cat be.log; exit 1
+      - uses: actions/checkout@v4
+        with:
+          repository: aviandri/asana-clone-fe
+          token: ${{ secrets.FE_REPO_TOKEN || github.token }}
+          ref: ${{ inputs.fe_ref || 'main' }}
+          path: fe
+          sparse-checkout: deploy
+      - name: Start nginx with the FE repo's config
+        run: |
+          docker run -d --name nginx --add-host=host.docker.internal:host-gateway \
+            -e BACKEND_URL=http://host.docker.internal:3000 \
+            -v "$PWD/fe/deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro" \
+            -p 8080:80 nginx:1.27-alpine
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/health && exit 0
+            sleep 1
+          done
+          echo "nginx → backend did not become ready"; docker logs nginx; exit 1
+      - name: MCP + OAuth e2e (through nginx)
+        env:
+          BASE_URL: http://localhost:8080
+          CIMD_CERT: ${{ runner.temp }}/tls/leaf.pem
+          CIMD_KEY: ${{ runner.temp }}/tls/leaf.key
+        run: node .github/mcp-e2e/mcp-e2e.mjs
+      - name: Backend and nginx logs
+        if: always()
+        run: |
+          echo "::group::be.log"; cat be.log || true; echo "::endgroup::"
+          echo "::group::nginx"; docker logs nginx 2>&1 | tail -200 || true; echo "::endgroup::"
+
   upgrade:
     # Upgrade path for real deployments: build a database at an earlier release (migrate + seed),
     # migrate it with this commit, then check nothing was lost and the new schema is in place:
