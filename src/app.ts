@@ -148,16 +148,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     const schedule = (delay: number) => {
       if (closed) return;
       timer = setTimeout(() => {
-        sweepAttachments(app.db, app.storage, new Date(), app.log)
+        // Independent: one failing never skips the other.
+        const attachments = sweepAttachments(app.db, app.storage, new Date(), app.log)
           .then((r) => {
             if (r.drafts || r.orphans) app.log.info(r, 'Attachment sweep');
           })
-          .then(() => sweepOAuth(app.db, new Date()))
+          .catch((err: unknown) => app.log.error({ err }, 'Attachment sweep failed'));
+        const oauth = sweepOAuth(app.db, new Date())
           .then((r) => {
             if (Object.values(r).some((n) => n > 0)) app.log.info(r, 'OAuth sweep');
           })
-          .catch((err: unknown) => app.log.error({ err }, 'Attachment sweep failed'))
-          .finally(() => schedule(SWEEP_INTERVAL_MS));
+          .catch((err: unknown) => app.log.error({ err }, 'OAuth sweep failed'));
+        void Promise.all([attachments, oauth]).finally(() => schedule(SWEEP_INTERVAL_MS));
       }, delay);
       timer.unref();
     };
