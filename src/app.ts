@@ -21,6 +21,8 @@ import reportRoutes from './routes/reports.js';
 import workspaceRoutes from './routes/workspaces.js';
 import attachmentRoutes from './routes/attachments.js';
 import tokenRoutes from './routes/tokens.js';
+import mcpRoutes from './routes/mcp.js';
+import { APP_VERSION } from './version.js';
 import oauthRoutes, { oauthRequestRoutes, sweepOAuth } from './routes/oauth.js';
 import { sweepAttachments } from './lib/attachments.js';
 import { DiskStorage, type StorageDriver } from './lib/storage.js';
@@ -130,10 +132,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   await app.register(oauthRoutes);
 
   if (opts.config.MCP_ENABLED) {
-    // The MCP endpoint (SPEC §14): bearer auth only. The tools arrive with the MCP server itself.
-    app.post('/mcp', { config: { bearer: true } }, async () => {
-      throw new AppError('NOT_FOUND', 'The MCP server is not available yet');
-    });
+    // The MCP endpoint (SPEC §14): bearer auth only.
+    await app.register(mcpRoutes, { version: APP_VERSION });
   } else {
     // Feature off: a plain 404 for every method, not the 401 an unknown route gets without a session.
     app.all('/mcp', { config: { public: true } }, async () => {

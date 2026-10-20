@@ -3,7 +3,8 @@ import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { User } from '@prisma/client';
-import { forbidden, unauthorized } from '../errors.js';
+import { AppError, forbidden, unauthorized } from '../errors.js';
+import { INTERNAL_HEADER, takeTicket } from '../mcp/internal.js';
 import { authenticateToken, bearerToken, UsageThrottle, type Principal } from '../lib/tokens.js';
 import type { Member } from '../lib/workspaces.js';
 
@@ -81,8 +82,23 @@ async function authPlugin(app: FastifyInstance, opts: { secret: string; secureCo
     }
   }
 
+  /**
+   * An MCP tool's in-process REST call (M14). Anything else carrying the header, e.g. from the network,
+   * is a 400 before any route runs. A READ ticket may only read.
+   */
+  async function authenticateInternal(req: FastifyRequest) {
+    const claim = takeTicket(req.headers[INTERNAL_HEADER]);
+    if (!claim) throw new AppError('VALIDATION', 'Unexpected internal header');
+    if (!req.url.startsWith('/api/v1/')) throw new AppError('VALIDATION', 'Unexpected internal header');
+    if (claim.scope === 'READ' && req.method !== 'GET') throw forbidden('this token is read-only');
+    const user = await app.db.user.findUnique({ where: { id: claim.userId } });
+    if (!user || !user.isActive) throw unauthorized('Session expired or invalid');
+    req.user = user;
+  }
+
   // Every route requires a session unless it opts out with `config: { public: true }`.
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
+    if (req.headers[INTERNAL_HEADER] !== undefined) return authenticateInternal(req);
     if (req.routeOptions.config?.public) return;
     if (req.routeOptions.config?.bearer) return authenticateBearer(req, reply);
     const token = req.cookies[SESSION_COOKIE];
