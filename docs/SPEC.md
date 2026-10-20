@@ -1057,7 +1057,7 @@ admin or invites, or file upload and download.
   it's in the backlog.)
 - **M18** Data model additions: `OAuthRequest {id, clientId, redirectUri, codeChallenge, scope, resource, state,
   expiresAt (10 min), decidedAt?, userId?}` (in the DB); `OAuthCode.family?` (set on exchange). FKs with cascade
-  from `OAuthRequest` / `OAuthCode` / `OAuthRefresh` / OAuth `ApiToken` to `OAuthClient` and `User`.
+  from `OAuthRequest` / `OAuthCode` / `OAuthRefresh` / OAuth `ApiToken` to `OAuthClient` and `User`. `OAuthClient.cachedAt` (CIMD, M11).
 - **M19** `/me/tokens` OAuth rows: `id` = the family uuid (`DELETE` takes a PAT id or a family id); `prefix` = the
   live refresh token's prefix; `createdAt` = the first grant; `lastUsedAt` = the latest use of any access token in
   the family; `expiresAt` = the live refresh token's expiry.
