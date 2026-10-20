@@ -244,7 +244,7 @@ try {
 
   if (wantTools) {
     const { mcpChecks } = await import('./mcp-tools.mjs');
-    await mcpChecks({ BASE, MCP_URL, rest, check, same, projectId, tokens: { write: dcr2.saved.tokens, read: ro.saved.tokens } });
+    await mcpChecks({ BASE, MCP_URL, rest, check, same, projectId, providers: { write: dcr2, read: ro } });
   }
 } catch (e) {
   check('UNCAUGHT', false, String(e?.stack ?? e));

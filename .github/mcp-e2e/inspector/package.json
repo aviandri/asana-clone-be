@@ -1,0 +1,8 @@
+{
+  "name": "mcp-e2e-inspector",
+  "private": true,
+  "description": "The MCP Inspector CLI for the PAT smoke in mcp-tools.mjs (needs node >= 22.19)",
+  "dependencies": {
+    "@modelcontextprotocol/inspector": "2.10.0"
+  }
+}
