@@ -157,7 +157,8 @@ jobs:
   mcp:
     # SPEC §14 end to end: the official MCP SDK client (.github/mcp-e2e, its own pinned deps) does
     # the real OAuth flows (DCR, CIMD, a random-port loopback redirect, consent via the cookie API,
-    # token, refresh rotation, revoke) through the FE repo's production nginx, as claude.ai would.
+    # token, refresh rotation, revoke) through the FE repo's production nginx, as claude.ai would,
+    # then lists and calls every tool with those grants, and runs the MCP Inspector CLI with a PAT.
     # CIMD needs an https client_id: the job makes a throwaway CA, serves the metadata document
     # with it on 127.0.0.1, and the BE trusts it via NODE_EXTRA_CA_CERTS (test-only:
     # LINK_PREVIEW_ALLOW_PRIVATE, which the BE refuses in production).
@@ -231,11 +232,21 @@ jobs:
             sleep 1
           done
           echo "nginx → backend did not become ready"; docker logs nginx; exit 1
+      # The MCP Inspector needs node >= 22.19; the BE keeps running on 20.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/mcp-e2e/inspector/package-lock.json
+      - run: npm ci --prefix .github/mcp-e2e/inspector
       - name: MCP + OAuth e2e (through nginx)
         env:
           BASE_URL: http://localhost:8080
           CIMD_CERT: ${{ runner.temp }}/tls/leaf.pem
           CIMD_KEY: ${{ runner.temp }}/tls/leaf.key
+          # The tool half: tools/list, every tool, READ-token rules, transport rules, Inspector + PAT.
+          MCP_TOOLS: "1"
+          INSPECTOR_BIN: ${{ github.workspace }}/.github/mcp-e2e/inspector/node_modules/.bin/mcp-inspector
         run: node .github/mcp-e2e/mcp-e2e.mjs
       - name: Backend and nginx logs
         if: always()
