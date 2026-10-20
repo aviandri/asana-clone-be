@@ -851,8 +851,8 @@ and **resource indicators**. Public clients only (`token_endpoint_auth_method: "
   - Valid → `302` to the FE consent page `/connect/authorize?request=<id>`. The server stores the
     validated request (10 min TTL), so the FE never sees or re-sends raw parameters. Omitted
     `scope` = `read write`.
-- `GET /api/v1/oauth/requests/:id` (cookie) → `{client: {name, redirectHost}, scopes: ["read","write"],
-  user: Me, workspaces: Workspace[]}`, or `404`/`410` if unknown or expired.
+- `GET /api/v1/oauth/requests/:id` (cookie) → `{client: {name, redirectHost, clientIdHost}, requestedScopes,
+  expiresAt, isLocalRedirect, user: Me, workspaces: Workspace[]}` (M7, M28), or `404`/`410` if unknown or expired.
 - `POST /api/v1/oauth/requests/:id/decision` (cookie, JSON body only; CSRF is covered by
   SameSite=Lax plus the JSON content type) with `{approve: boolean, scope?: "READ"|"WRITE"}`. The user may
   downgrade to read-only. Returns `{redirectUrl}` (`…?code=…&state=…`, or `?error=access_denied&state=…`).
@@ -1081,3 +1081,6 @@ admin or invites, or file upload and download.
   REST. Guests get exactly what REST gives them (`list_teams` / `list_goals` → `[]`, `get_goal` → `NOT_FOUND`).
   The sweeper removes revoked or expired tokens and OAuth rows after 30 d, and expired requests and codes after 1 h.
 - **M27** SDK: `@modelcontextprotocol/sdk` **1.32.1**, pinned exactly. The transitive express/hono deps are acceptable.
+- **M28** The exact `GET /api/v1/oauth/requests/:id` shape: `{client: {name: string, redirectHost: string,
+  clientIdHost: string | null /* CIMD client_id URL host; null = DCR client */}, requestedScopes: ("read"|"write")[],
+  expiresAt: string, isLocalRedirect: boolean, user: Me, workspaces: Workspace[]}`. There is no separate `scopes` field.
