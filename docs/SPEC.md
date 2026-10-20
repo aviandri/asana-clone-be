@@ -800,7 +800,7 @@ OAuthRefresh  id, tokenHash (unique), family (uuid), clientId, userId, scope, ex
   cookie-only (no change for the web, Mac and Android clients, and a leaked token can't drive the
   REST API).
 - An invalid, expired or revoked token, or no token → `401` with
-  `WWW-Authenticate: Bearer resource_metadata="<PUBLIC_URL>/.well-known/oauth-protected-resource/mcp"`
+  `WWW-Authenticate: Bearer resource_metadata="<APP_URL>/.well-known/oauth-protected-resource/mcp"`
   (plus `error="invalid_token"` when a token was sent). This is what makes claude.ai start the OAuth
   flow.
 - A `READ` token calling a write tool → a tool error `FORBIDDEN: this token is read-only`
@@ -824,14 +824,15 @@ type ApiTokenInfo = { id: string; name: string; source: "PAT" | "OAUTH"; scope: 
 Implements what the MCP authorization spec requires: **authorization code + PKCE (S256 only)**,
 **dynamic client registration**, **protected resource metadata**, **authorization server metadata**,
 and **resource indicators**. Public clients only (`token_endpoint_auth_method: "none"`).
-- **`PUBLIC_URL`** (new env, e.g. `https://project.example.com`, no trailing slash) is the issuer and
-  base of every URL below. The MCP resource is **`<PUBLIC_URL>/mcp`**. If `PUBLIC_URL` is unset, `/mcp`,
-  `/oauth/*` and `/.well-known/*` return `404` (feature off).
+- The existing **`APP_URL`** (the public origin; FE and BE share it behind nginx) is the issuer and base of
+  every URL below. The MCP resource is **`<APP_URL>/mcp`**. The feature is on only when **`MCP_ENABLED=true`**;
+  otherwise `/mcp`, `/oauth/*` and `/.well-known/oauth-*` return `404`. With `MCP_ENABLED=true` the BE
+  refuses to start unless `APP_URL` is `https://` (except `http://localhost` / `127.0.0.1` in dev and test).
 - `GET /.well-known/oauth-protected-resource/mcp` (and `/.well-known/oauth-protected-resource`) →
-  `{resource: "<PUBLIC_URL>/mcp", authorization_servers: ["<PUBLIC_URL>"], scopes_supported:
+  `{resource: "<APP_URL>/mcp", authorization_servers: ["<APP_URL>"], scopes_supported:
   ["read","write"], bearer_methods_supported: ["header"]}`.
 - `GET /.well-known/oauth-authorization-server` → RFC 8414 metadata: `issuer`,
-  `authorization_endpoint` `<PUBLIC_URL>/oauth/authorize`, `token_endpoint` `/oauth/token`,
+  `authorization_endpoint` `<APP_URL>/oauth/authorize`, `token_endpoint` `/oauth/token`,
   `registration_endpoint` `/oauth/register`, `revocation_endpoint` `/oauth/revoke`,
   `response_types_supported ["code"]`, `grant_types_supported ["authorization_code","refresh_token"]`,
   `code_challenge_methods_supported ["S256"]`, `token_endpoint_auth_methods_supported ["none"]`,
@@ -845,7 +846,7 @@ and **resource indicators**. Public clients only (`token_endpoint_auth_method: "
   - An unknown client, or a `redirect_uri` that isn't **exactly** one of the registered ones →
     a plain HTML error page (**never redirect** to an unverified URI).
   - Other errors (missing or non-S256 challenge, a bad `resource` that isn't
-    `<PUBLIC_URL>/mcp`, a bad scope) → redirect to `redirect_uri` with `error=invalid_request` /
+    `<APP_URL>/mcp`, a bad scope) → redirect to `redirect_uri` with `error=invalid_request` /
     `invalid_scope` and `state`.
   - Valid → `302` to the FE consent page `/connect/authorize?request=<id>`. The server stores the
     validated request (10 min TTL), so the FE never sees or re-sends raw parameters. Omitted
@@ -876,7 +877,7 @@ and **resource indicators**. Public clients only (`token_endpoint_auth_method: "
   `reply.hijack()`.
 - Server info: `name: "mekari-project"`, `title: "Mekari Project"`, `version` = the BE version, and
   `instructions` explaining workspaces, `"me"`, date formats and that task text is user content.
-- `Origin` header present and not an allowed origin (`PUBLIC_URL`, `https://claude.ai`,
+- `Origin` header present and not an allowed origin (`APP_URL`, `https://claude.ai`,
   `https://*.claude.ai`, `https://*.anthropic.com`) → `403`, to prevent DNS rebinding from browsers.
 - Body limit 1 MB. Each tool call has a 15 s budget.
 
@@ -892,7 +893,7 @@ and **resource indicators**. Public clients only (`token_endpoint_auth_method: "
   that lists candidates (≤ 5). **Projects / sections** are given by id. Use `list_projects` / `search`
   to find them.
 - Dates are `YYYY-MM-DD`. Relative dates ("tomorrow") are resolved by Claude, not the server.
-- Every entity in output includes **`url`**, a web deep link (`<PUBLIC_URL>/…`, the same routes the FE
+- Every entity in output includes **`url`**, a web deep link (`<APP_URL>/…`, the same routes the FE
   uses) so Claude can hand it back to the user.
 - Lists: `limit` (default 25, max 100) + opaque `cursor`; the output has `nextCursor | null`. Task
   `description` is truncated to 2000 chars in lists and 20 000 in `get_task` (with `truncated: true`).
@@ -950,11 +951,11 @@ admin or invites, or file upload and download.
     expires) with **Revoke** (with a confirm step).
   - **Create token**: a dialog with name, scope (Read only / Read & write) and expiry. On success the token is
     shown **once**, with Copy and a warning, plus ready-to-paste setup snippets:
-    - claude.ai: Settings → Connectors → *Add custom connector* → URL `<PUBLIC_URL>/mcp`
+    - claude.ai: Settings → Connectors → *Add custom connector* → URL `<APP_URL>/mcp`
       (OAuth, no token needed).
-    - Claude Code: `claude mcp add --transport http mekari-project <PUBLIC_URL>/mcp --header "Authorization: Bearer <token>"`.
+    - Claude Code: `claude mcp add --transport http mekari-project <APP_URL>/mcp --header "Authorization: Bearer <token>"`.
   - The page also shows the MCP URL with a Copy button (the FE gets it from `GET /api/v1/config` →
-    `{publicUrl, mcpEnabled}`, a new cookie-auth endpoint).
+    `{appUrl, mcpEnabled}`, a new cookie-auth endpoint).
 - **Consent page `/connect/authorize?request=<id>`**: if the user isn't logged in → login, then
   back. It shows the client name and redirect host, the signed-in user, and what it can do ("Read your
   projects, tasks… / Create and update tasks, comments… Never delete"), with a "Read only" toggle and
@@ -963,10 +964,11 @@ admin or invites, or file upload and download.
 - Mac and Android: no change in v1.4 (frozen).
 
 ### Deployment
-- Env: **`PUBLIC_URL`** (required for MCP), `MCP_ENABLED` (default `true` when `PUBLIC_URL` is set).
+- Env: **`MCP_ENABLED`** (default `false`), `APP_URL` (already exists; must be the public HTTPS origin),
+  `TRUST_PROXY_HOPS` (M2), `OAUTH_REGISTER_RATE_LIMIT` (M3).
 - nginx and the preview `serve.mjs`: proxy **`/mcp`, `/oauth/`, `/.well-known/oauth-`** to the BE
   (as `/api/`), with buffering off for `/mcp` (streamed responses). `/connect/*` is the FE.
-- claude.ai connects **from Anthropic's servers**, so `PUBLIC_URL` must be publicly reachable over
+- claude.ai connects **from Anthropic's servers**, so `APP_URL` must be publicly reachable over
   HTTPS with a **stable hostname**. A quick tunnel whose URL changes on restart means re-adding the connector
   each time.
 
@@ -981,4 +983,44 @@ admin or invites, or file upload and download.
   and calls every tool. Plus a `@modelcontextprotocol/inspector` CLI smoke with a PAT.
 
 ### Clarifications (agreed)
-_(none yet)_
+- **M1** There is no separate `PUBLIC_URL`. Everything uses `APP_URL` (issuer, resource, deep links, invite
+  links), and `MCP_ENABLED=true` turns the feature on. This avoids two envs that must match.
+- **M2** Client IP. Proxies **overwrite** `X-Forwarded-For` with exactly one entry: nginx
+  `proxy_set_header X-Forwarded-For $remote_addr;`, and the preview `serve.mjs` sets it to `CF-Connecting-IP`
+  (from cloudflared) or else the socket address. The BE uses `trustProxy: <TRUST_PROXY_HOPS>` (new env,
+  default `1`) instead of `true`, so a client-sent XFF can't pick its own rate-limit bucket. This also
+  applies to the existing per-IP limits (login, accept-invite). Tests cover a spoofed XFF.
+- **M3** The DCR limit is `OAUTH_REGISTER_RATE_LIMIT` per IP per hour, default **30**, because claude.ai
+  registers from a few shared Anthropic egress IPs. CI sets it high. The global cap of 1000 clients and pruning are unchanged.
+- **M4** `/connect/*` gets `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY` as
+  **HTTP headers** from nginx / `serve.mjs`, because a `<meta>` CSP can't set `frame-ancestors`. The FE must not rely on a meta tag.
+- **M5** nginx / `serve.mjs`: `/.well-known/oauth-*` → the BE; any other `/.well-known/*` → `404` (no SPA
+  fallback). `/mcp`: request and response buffering off, `proxy_cache off`, `client_max_body_size 1m`,
+  `proxy_read_timeout 60s`.
+- **M6** Deep-link `url`s (all `<APP_URL>`-prefixed):
+  - Task: `/projects/<projectId>/list?task=<id>`; a subtask uses its own `projectId`, else its parent's.
+    A personal task: `/my-tasks?task=<id>`.
+  - Project: `/projects/<id>`. `project_report`: `/projects/<id>/dashboard`. Section, comment: the parent
+    project or task URL.
+  - Goal: `/goals/<id>`. Team: `/teams/<id>`. `workload`: `/reporting?workspace=<wsId>`.
+  - Notification: its task's URL. `list_notifications` result: `/inbox?workspace=<wsId>`; `my_tasks`:
+    `/my-tasks?workspace=<wsId>`.
+  - Person: `url: null`.
+  - Attachment: FILE → `/api/v1/attachments/<id>/download` (works with the browser's cookie); LINK → its
+    external `url`. Attachments in `get_task` carry `kind`.
+  - Entity pages switch workspace by themselves (§12), so no `workspace` param is needed there.
+- **M7** `GET /api/v1/oauth/requests/:id` also returns `expiresAt`, `isLocalRedirect` (`http://localhost` /
+  `127.0.0.1`) and `requestedScopes` (`["read"]` or `["read","write"]`). When only `read` was
+  requested, the FE hides the toggle and the decision must be `READ`; `WRITE` → `400`. Deciding a request
+  that has already been decided → `409 CONFLICT`; unknown → `404`; expired → `410 GONE`. The request isn't
+  bound to a user until the decision: whoever is signed in when deciding is the user the grant belongs to (the FE
+  offers "Not you? Sign in as someone else").
+- **M8** Consent works for a user with no workspace (the grant is per user, not per workspace). Tokens and
+  grants act as the user in every workspace they belong to, with their role there, GUEST included.
+- **M9** With `MCP_ENABLED=false`: `GET /me/tokens` and `DELETE /me/tokens/:id` still work (people can
+  revoke), and `POST /me/tokens` → `404`. `GET /api/v1/config` → `{appUrl, mcpEnabled}` (renamed from
+  `publicUrl`; see M1).
+- **M10** Deploy split: the FE repo's `deploy/nginx.conf.template` (M4/M5 routes and headers) is done by FE
+  with the consent PR. The preview `serve.mjs` is done by platform. The consent page also refuses to render its
+  buttons when framed (JS frame-bust), as a fallback where the header is missing. The setup snippet shows
+  the env-var form `--header "Authorization: Bearer $MEKARI_PROJECT_TOKEN"` alongside the inline one.
