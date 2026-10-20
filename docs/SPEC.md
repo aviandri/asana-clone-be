@@ -896,7 +896,7 @@ and **resource indicators**. Public clients only (`token_endpoint_auth_method: "
 - Every entity in output includes **`url`**, a web deep link (`<APP_URL>/…`, the same routes the FE
   uses) so Claude can hand it back to the user.
 - Lists: `limit` (default 25, max 100) + opaque `cursor`; the output has `nextCursor | null`. Task
-  `description` is truncated to 2000 chars in lists and 20 000 in `get_task` (with `truncated: true`).
+  `description` isn't in list results; `get_task` truncates it at 20 000 chars (with `truncated: true`).
 - **Errors are tool results** with `isError: true` and a message starting with the REST code
   (`NOT_FOUND: …`, `VALIDATION: assigneeId: …`, `FORBIDDEN: …`). A resource the user can't see is
   always `NOT_FOUND`. JSON-RPC errors are only for protocol problems.
@@ -915,7 +915,7 @@ and **resource indicators**. Public clients only (`token_endpoint_auth_method: "
 | `list_tasks` | `projectId, sectionId?, assignee?, completed? (false), dueBefore?, dueAfter?, limit?, cursor?` | `{tasks: TaskSummary[], nextCursor}` (ordered by section, then position) |
 | `my_tasks` | `workspaceId?, completed? (false), dueBefore?, limit?, cursor?` | `{tasks: TaskSummary[], nextCursor}` (assigned to me; ordered by due date, nulls last) |
 | `get_task` | `taskId, includeComments? (true), commentLimit? (20)` | task detail: description, project/section, assignee, dates, priority, followers, subtasks (summaries), parent, attachments (name/kind/size/url only, **no file content**), latest comments (`{author, body, createdAt, attachmentNames}`) |
-| `search` | `query (2–200), workspaceId?` | the same results as `/search` (tasks, projects, people; ≤10 each), with urls |
+| `search` | `query (2–100), workspaceId?` | the same results as `/search` (tasks, projects, people; ≤10 each), with urls |
 | `list_goals` | `workspaceId?, timePeriod?, teamId?, owner?, query?` | `{goals: {id,title,status,progress,owner,timePeriod,parentId,url}[]}` |
 | `get_goal` | `goalId` | goal + key results + linked projects + latest updates (≤ 5) |
 | `project_report` | `projectId, weeks? (12)` | the `ProjectReport` shape (§11) |
@@ -1008,7 +1008,8 @@ admin or invites, or file upload and download.
   - Person: `url: null`.
   - Attachment: FILE → `/api/v1/attachments/<id>/download` (works with the browser's cookie); LINK → its
     external `url`. Attachments in `get_task` carry `kind`.
-  - Entity pages switch workspace by themselves (§12), so no `workspace` param is needed there.
+  - Every `url` also gets `workspace=<wsId>` (`?` or `&`). The FE applies it and strips it, so links work
+    across workspaces (see M25).
 - **M7** `GET /api/v1/oauth/requests/:id` also returns `expiresAt`, `isLocalRedirect` (`http://localhost` /
   `127.0.0.1`) and `requestedScopes` (`["read"]` or `["read","write"]`). When only `read` was
   requested, the FE hides the toggle and the decision must be `READ`; `WRITE` → `400`. Deciding a request
@@ -1041,3 +1042,42 @@ admin or invites, or file upload and download.
   `160.79.104.0/21`, so don't firewall it. The OAuth endpoints must answer in ≪ 10 s, and `/oauth/token`
   refresh failures are always `invalid_grant`. Scopes stay `read`/`write`, with no `offline_access`, and refresh
   tokens are always issued. Source: https://claude.com/docs/connectors/building/authentication
+- **M14** Parity by construction. MCP tools call the **existing REST handlers in-process** via `app.inject`, with a
+  single-use **internal principal ticket**: 32 random bytes in an in-memory map, bound to `{userId, tokenId,
+  scope}`, a 30 s TTL, deleted on first use. It's sent in an internal header that the auth hook accepts **only on
+  injected requests**. A network request carrying that header → `400` in `onRequest`, before routing. The workspace goes
+  in `X-Workspace-Id`. A READ-scope ticket can only perform `GET`. MCP-only work (filters, cursors, summaries,
+  urls) is done on the REST output. `/api/v1` still never accepts a Bearer token from the network.
+- **M15** `workspaceId` behaves exactly like `X-Workspace-Id` (strict: not a member → `NOT_FOUND`). Omitted → the
+  REST default. MCP never writes `lastWorkspaceId`. No active membership → tool error `NO_WORKSPACE: …`.
+- **M16** "Deactivated → 401" means the global `User.isActive`. Deactivation inside one workspace → `NOT_FOUND` /
+  `NO_WORKSPACE` there, as in REST.
+- **M17** "Password change" = `PATCH /users/me` with `newPassword`. It revokes all PATs, OAuth refresh families
+  and outstanding codes and requests. (Cookie JWTs still survive a password change; that's out of scope for v1.4, and
+  it's in the backlog.)
+- **M18** Data model additions: `OAuthRequest {id, clientId, redirectUri, codeChallenge, scope, resource, state,
+  expiresAt (10 min), decidedAt?, userId?}` (in the DB); `OAuthCode.family?` (set on exchange). FKs with cascade
+  from `OAuthRequest` / `OAuthCode` / `OAuthRefresh` / OAuth `ApiToken` to `OAuthClient` and `User`.
+- **M19** `/me/tokens` OAuth rows: `id` = the family uuid (`DELETE` takes a PAT id or a family id); `prefix` = the
+  live refresh token's prefix; `createdAt` = the first grant; `lastUsedAt` = the latest use of any access token in
+  the family; `expiresAt` = the live refresh token's expiry.
+- **M20** Refresh race: reusing a refresh token **within 30 s of its rotation** → `invalid_grant` **without**
+  revoking the family. Later reuse → the family is revoked.
+- **M21** `add_link` is **synchronous**, through the REST route (the §13 preview fetch is ≤ 6 s; the A12
+  limits apply). The result carries `previewStatus`.
+- **M22** `list_tasks` returns top-level tasks only (subtasks via `get_task`). Filters and cursors are applied
+  MCP-side on the REST result; the cursor is an opaque offset over a stable order.
+- **M23** Content types: the OAuth decision endpoint requires `application/json` (else `415`). `/oauth/token` and
+  `/oauth/revoke` get a scoped `application/x-www-form-urlencoded` parser (no new dependency). `/oauth/register`
+  is JSON. `OPTIONS` preflight on `/oauth/*` and `/.well-known/*` with `ACAO: *`. `/mcp` has no CORS.
+- **M24** Transport `enableJsonResponse: true`: plain JSON per POST, no SSE. A timeout returns
+  `TIMEOUT: … (a write may still have been applied)`. Rate limits, the DCR limit and the `lastUsedAt` throttle are
+  per-process and in-memory, like the existing limiters. DCR at the client cap → `503 temporarily_unavailable` after an
+  inline prune. SDK input-validation errors keep the SDK's `MCP error -32602: …` text. The 401/403/405/429
+  responses are sent before `reply.hijack()`. The Origin check is ours, run before the SDK (it supports wildcards).
+- **M25** Deep links with `workspace=<wsId>` (M6). FILE attachments link to `/api/v1/attachments/<id>/download`
+  (the user's browser has the cookie). Bytes are never returned through MCP.
+- **M26** Tool notes: `follow_task` is caller-only (a subset of REST). `update_project` requires canManage, as in
+  REST. Guests get exactly what REST gives them (`list_teams` / `list_goals` → `[]`, `get_goal` → `NOT_FOUND`).
+  The sweeper removes revoked or expired tokens and OAuth rows after 30 d, and expired requests and codes after 1 h.
+- **M27** SDK: `@modelcontextprotocol/sdk` **1.32.1**, pinned exactly. The transitive express/hono deps are acceptable.
