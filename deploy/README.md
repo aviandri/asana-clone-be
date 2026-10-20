@@ -157,5 +157,26 @@ add it to your backups from then on (see Backups).
 - **Disk:** files live on the Docker host's disk under the volume. Watch free space
   (`docker system df -v | grep attachments`).
 
+### Upgrading to v1.4 (MCP server and API tokens)
+v1.4 adds a remote MCP server so people can use the app from Claude, plus personal access tokens
+(SPEC §14). Its migrations only add tables, enums and indexes; take a `pg_dump` first as usual.
+The feature is off until you set `MCP_ENABLED=true` in `.env`.
+
+- **APP_URL:** with MCP on, `APP_URL` is also the OAuth issuer and the MCP URL is `<APP_URL>/mcp`.
+  It must be https (`be` refuses to start otherwise; plain http only for `localhost` /
+  `127.0.0.1`, and never with `NODE_ENV=production`, which compose sets).
+- **Stable public hostname:** claude.ai connects from Anthropic's servers (`160.79.104.0/21`), so
+  `APP_URL` must be reachable from the internet and must not change. A new hostname is a new OAuth
+  issuer: every connected Claude has to be added again, and sign-ins and invite links on the old
+  hostname stop working. A Cloudflare quick tunnel (new URL on every restart) is not suitable.
+- **Client IPs:** `TRUST_PROXY_HOPS` (default `1`) is the number of proxies in front of `be` that
+  set `X-Forwarded-For`. With compose that is the `fe` nginx, so leave it at `1`. If another proxy
+  or load balancer sits in front of nginx, nginx sees that proxy's address as the client, and
+  per-IP rate limits (login, accept-invite, OAuth client registration) then share one bucket:
+  have nginx take the real client address from that proxy (e.g. `set_real_ip_from` +
+  `real_ip_header CF-Connecting-IP` behind Cloudflare) rather than raising the hop count.
+- **Firewalls / WAF:** if anything in front of nginx challenges bots (e.g. Cloudflare Bot Fight
+  Mode), exempt `/mcp`, `/oauth/` and `/.well-known/` so Anthropic's servers aren't blocked.
+
 ## Logs
 `docker compose logs -f be` / `fe` / `postgres`.
