@@ -11,6 +11,8 @@ const CIMD_MAX_BYTES = 64 * 1024;
 const CIMD_BUDGET_MS = 5_000;
 
 export const MAX_REDIRECT_URIS = 5;
+/** Registered clients at most (DCR and cached CIMD documents together); see pruneOAuthClients. */
+export const MAX_CLIENTS = 1000;
 
 /** A display name: cleaned like a filename (no controls or bidi tricks), ≤ 100 chars. */
 export const clientName = z
@@ -58,6 +60,8 @@ export async function resolveClient(
   clientId: string,
   now: Date,
   log?: { info: (obj: object, msg: string) => void },
+  /** Makes room at the client cap; a new CIMD client is refused if there is none. */
+  prune?: () => Promise<unknown>,
 ): Promise<ResolvedClient | null> {
   if (!isMetadataClientId(clientId)) {
     if (clientId.length > 200) return null;
@@ -66,6 +70,10 @@ export async function resolveClient(
   }
   const cached = await db.oAuthClient.findUnique({ where: { clientId } });
   if (cached?.source === 'CIMD' && cached.cachedAt && now.getTime() - cached.cachedAt.getTime() < CIMD_FRESH_MS) return cached;
+  if (!cached && (await db.oAuthClient.count()) >= MAX_CLIENTS) {
+    await prune?.();
+    if ((await db.oAuthClient.count()) >= MAX_CLIENTS) return null;
+  }
   try {
     const doc = await fetchMetadata(clientId, policy);
     const data = { name: doc.client_name, redirectUris: doc.redirect_uris, cachedAt: now };

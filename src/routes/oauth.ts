@@ -1,33 +1,32 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { OAuthClient, TokenScope, User } from '@prisma/client';
+import type { OAuthClient, Prisma, TokenScope } from '@prisma/client';
 import { z } from 'zod';
 import { AppError, conflict, notFound, validation } from '../errors.js';
-import { generateToken, hashToken, revokeFamily } from '../lib/tokens.js';
+import { generateToken, hashToken, lockUser, revokeFamily } from '../lib/tokens.js';
 import {
   ACCESS_TOKEN_TTL_S,
   CODE_TTL_MS,
   escapeHtml,
   isLoopbackRedirect,
-  isMetadataClientId,
   parseScope,
   pkceMatches,
   REFRESH_REUSE_GRACE_MS,
   REFRESH_TOKEN_TTL_MS,
   redirectUriMatches,
+  redirectUriProblem,
   REQUEST_TTL_MS,
   S256_CHALLENGE,
   scopeList,
   scopeString,
   withParams,
 } from '../lib/oauth.js';
-import { clientName, MAX_REDIRECT_URIS, resolveClient } from '../lib/oauth-clients.js';
-import { redirectUriProblem } from '../lib/oauth.js';
+import { clientName, MAX_CLIENTS, MAX_REDIRECT_URIS, resolveClient } from '../lib/oauth-clients.js';
+
+export { MAX_CLIENTS };
 import { idParams, parse } from '../lib/validate.js';
 import { loadMe } from '../lib/workspaces.js';
 
-/** DCR keeps at most this many clients; at the cap, stale ones are pruned first (SPEC §14). */
-export const MAX_CLIENTS = 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 type Db = FastifyInstance['db'];
@@ -54,10 +53,13 @@ function sendOAuthError(reply: FastifyReply, err: OAuthError) {
 type Form = Record<string, string>;
 const DUPLICATE = Symbol('duplicate');
 
-/** Prunes clients nobody uses (M11): DCR ones that never got a token after a day, any unused for 30 days. */
+/**
+ * Prunes clients nobody uses (M11): ones that never got a token after a day, any unused for 30 days.
+ * CIMD clients too: they are only a cache of their document, refetched on next use.
+ */
 export async function pruneOAuthClients(db: Db, now: Date) {
   const neverUsed = await db.oAuthClient.deleteMany({
-    where: { source: 'DCR', createdAt: { lt: new Date(now.getTime() - DAY_MS) }, tokens: { none: {} }, refreshes: { none: {} } },
+    where: { createdAt: { lt: new Date(now.getTime() - DAY_MS) }, tokens: { none: {} }, refreshes: { none: {} } },
   });
   const cutoff = new Date(now.getTime() - 30 * DAY_MS);
   const unused = await db.oAuthClient.deleteMany({
@@ -83,39 +85,37 @@ export async function sweepOAuth(db: Db, now: Date) {
   return { requests: requests.count, codes: codes.count, tokens: tokens.count, refreshes: refreshes.count, clients };
 }
 
-/** Issues an access token and a refresh token in `family` (a new grant, or a rotation). */
-async function issueTokens(db: Db, client: OAuthClient, userId: string, scope: TokenScope, family: string, now: Date) {
+/** Issues an access token and a refresh token in `family` (a new grant, or a rotation). Under lockUser. */
+async function issueTokens(tx: Prisma.TransactionClient, client: OAuthClient, userId: string, scope: TokenScope, family: string, now: Date) {
   const access = generateToken('mpoa');
   const refresh = generateToken('mpor');
-  await db.$transaction([
-    db.apiToken.create({
-      data: {
-        userId,
-        name: client.name,
-        source: 'OAUTH',
-        scope,
-        prefix: access.prefix,
-        tokenHash: access.hash,
-        oauthClientId: client.id,
-        oauthFamily: family,
-        createdAt: now,
-        expiresAt: new Date(now.getTime() + ACCESS_TOKEN_TTL_S * 1000),
-      },
-    }),
-    db.oAuthRefresh.create({
-      data: {
-        tokenHash: refresh.hash,
-        prefix: refresh.prefix,
-        family,
-        clientId: client.id,
-        userId,
-        scope,
-        createdAt: now,
-        expiresAt: new Date(now.getTime() + REFRESH_TOKEN_TTL_MS),
-      },
-    }),
-    db.oAuthClient.update({ where: { id: client.id }, data: { lastUsedAt: now } }),
-  ]);
+  await tx.apiToken.create({
+    data: {
+      userId,
+      name: client.name,
+      source: 'OAUTH',
+      scope,
+      prefix: access.prefix,
+      tokenHash: access.hash,
+      oauthClientId: client.id,
+      oauthFamily: family,
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + ACCESS_TOKEN_TTL_S * 1000),
+    },
+  });
+  await tx.oAuthRefresh.create({
+    data: {
+      tokenHash: refresh.hash,
+      prefix: refresh.prefix,
+      family,
+      clientId: client.id,
+      userId,
+      scope,
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + REFRESH_TOKEN_TTL_MS),
+    },
+  });
+  await tx.oAuthClient.update({ where: { id: client.id }, data: { lastUsedAt: now } });
   return {
     access_token: access.token,
     token_type: 'Bearer',
@@ -152,9 +152,9 @@ export default async function oauthRoutes(app: FastifyInstance) {
   }
   // Anything else under them is a plain 404, not the 401 an unknown route gets without a session.
   for (const path of ['/oauth/*', '/.well-known/*']) {
-    app.all(path, pub, async () => {
+    app.route({ method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], url: path, ...pub, handler: async () => {
       throw notFound('Route');
-    });
+    } });
   }
 
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string', bodyLimit: 16 * 1024 }, (_req, body, done) => {
@@ -270,14 +270,16 @@ export default async function oauthRoutes(app: FastifyInstance) {
       );
   }
 
-  app.get('/oauth/authorize', pub, async (req, reply) => {
+  // Rate-limited: an unknown https client_id makes the server fetch a document (CIMD).
+  app.get('/oauth/authorize', { config: { public: true, rateLimit: { max: app.config.OAUTH_AUTHORIZE_RATE_LIMIT ?? 60, timeWindow: '1 minute' } } }, async (req, reply) => {
     const q = req.query as Record<string, unknown>;
     const str = (k: string) => (typeof q[k] === 'string' ? (q[k] as string) : undefined);
     const clientId = str('client_id');
     const redirectUri = str('redirect_uri');
     const state = str('state');
     if (!clientId) return errorPage(reply, 'The request has no client_id.');
-    const client = await resolveClient(db, app.fetchPolicy, clientId, new Date(), req.log);
+    const now = new Date();
+    const client = await resolveClient(db, app.fetchPolicy, clientId, now, req.log, () => pruneOAuthClients(db, now));
     if (!client) return errorPage(reply, 'The app asking for access is not registered, or its metadata could not be read.');
     if (!redirectUri || !redirectUriMatches(redirectUri, client.redirectUris)) {
       return errorPage(reply, 'The app gave a redirect address that is not registered for it.');
@@ -322,62 +324,80 @@ export default async function oauthRoutes(app: FastifyInstance) {
     return body;
   }
 
-  async function exchangeCode(f: Form, now: Date) {
+  type Outcome = { tokens: Awaited<ReturnType<typeof issueTokens>> } | { error: OAuthError };
+
+  /**
+   * Code → tokens. One transaction under the user's lock. Failures after the code is claimed are returned,
+   * not thrown, so the claim (and any revocation) commits: a code is burnt by any attempt.
+   */
+  async function exchangeCode(f: Form, now: Date): Promise<Outcome> {
     for (const k of ['code', 'redirect_uri', 'client_id', 'code_verifier']) {
-      if (!f[k]) throw new OAuthError('invalid_request', `${k} is required`);
+      if (!f[k]) return { error: new OAuthError('invalid_request', `${k} is required`) };
     }
     const client = await db.oAuthClient.findUnique({ where: { clientId: f.client_id! } });
-    if (!client) throw new OAuthError('invalid_client', 'Unknown client', 401);
+    if (!client) return { error: new OAuthError('invalid_client', 'Unknown client', 401) };
     const code = await db.oAuthCode.findUnique({ where: { codeHash: hashToken(f.code!) } });
-    if (!code || code.clientId !== client.id) throw new OAuthError('invalid_grant', 'Unknown authorization code');
-    // Single use: the first exchange claims it. A second one means the code leaked; what it issued goes too.
-    const claimed = await db.oAuthCode.updateMany({ where: { id: code.id, usedAt: null }, data: { usedAt: now } });
-    if (claimed.count === 0) {
-      const used = await db.oAuthCode.findUnique({ where: { id: code.id } });
-      if (used?.family) await revokeFamily(db, used.family, now);
-      throw new OAuthError('invalid_grant', 'Authorization code already used');
-    }
-    if (code.expiresAt <= now) throw new OAuthError('invalid_grant', 'Authorization code expired');
-    if (f.redirect_uri !== code.redirectUri) throw new OAuthError('invalid_grant', 'redirect_uri does not match');
-    if (f.resource !== undefined && f.resource !== code.resource) throw new OAuthError('invalid_target', `resource must be ${code.resource}`);
-    if (!pkceMatches(f.code_verifier!, code.codeChallenge)) throw new OAuthError('invalid_grant', 'code_verifier does not match');
-    const user = await db.user.findUnique({ where: { id: code.userId } });
-    if (!user?.isActive) throw new OAuthError('invalid_grant', 'The user is no longer active');
-    const family = randomUUID();
-    await db.oAuthCode.update({ where: { id: code.id }, data: { family } });
-    return issueTokens(db, client, user.id, code.scope, family, now);
+    if (!code || code.clientId !== client.id) return { error: new OAuthError('invalid_grant', 'Unknown authorization code') };
+    const grant = (why: string) => ({ error: new OAuthError('invalid_grant', why) });
+    return db.$transaction(async (tx): Promise<Outcome> => {
+      await lockUser(tx, code.userId);
+      // Single use: the first exchange claims it. A second one means the code leaked; what it issued goes too.
+      const claimed = await tx.oAuthCode.updateMany({ where: { id: code.id, usedAt: null }, data: { usedAt: now } });
+      if (claimed.count === 0) {
+        const used = await tx.oAuthCode.findUnique({ where: { id: code.id } });
+        if (used?.family) await revokeFamily(tx, used.family, now);
+        return grant('Authorization code already used');
+      }
+      if (code.expiresAt <= now) return grant('Authorization code expired');
+      if (f.redirect_uri !== code.redirectUri) return grant('redirect_uri does not match');
+      if (f.resource !== undefined && f.resource !== code.resource) {
+        return { error: new OAuthError('invalid_target', `resource must be ${code.resource}`) };
+      }
+      if (!pkceMatches(f.code_verifier!, code.codeChallenge)) return grant('code_verifier does not match');
+      const user = await tx.user.findUnique({ where: { id: code.userId } });
+      if (!user?.isActive) return grant('The user is no longer active');
+      const family = randomUUID();
+      await tx.oAuthCode.update({ where: { id: code.id }, data: { family } });
+      return { tokens: await issueTokens(tx, client, user.id, code.scope, family, now) };
+    });
   }
 
-  /** Rotation (M20). Every failure is invalid_grant (M13). */
-  async function refresh(f: Form, now: Date) {
-    const invalid = (why: string) => new OAuthError('invalid_grant', why);
-    if (!f.refresh_token || !f.client_id) throw invalid('refresh_token and client_id are required');
-    const row = await db.oAuthRefresh.findUnique({ where: { tokenHash: hashToken(f.refresh_token) }, include: { client: true, user: true } });
-    if (!row || row.client.clientId !== f.client_id) throw invalid('Unknown refresh token');
-    if (row.revokedAt) throw invalid('Refresh token revoked');
-    if (row.expiresAt <= now) throw invalid('Refresh token expired');
-    if (f.resource !== undefined && f.resource !== resource) throw invalid(`resource must be ${resource}`);
-    const claimed = await db.oAuthRefresh.updateMany({ where: { id: row.id, usedAt: null, revokedAt: null }, data: { usedAt: now } });
-    if (claimed.count === 0) {
-      const used = await db.oAuthRefresh.findUnique({ where: { id: row.id } });
-      // Two refreshes at once from one client: not theft. Later reuse of a rotated token is (M20).
-      if (used?.usedAt && now.getTime() - used.usedAt.getTime() > REFRESH_REUSE_GRACE_MS) await revokeFamily(db, row.family, now);
-      throw invalid('Refresh token already used');
-    }
-    if (!row.user.isActive) throw invalid('The user is no longer active');
-    return issueTokens(db, row.client, row.userId, row.scope, row.family, now);
+  /** Rotation (M20), under the user's lock (so it can't outrun a revocation). Every failure is invalid_grant (M13). */
+  async function refresh(f: Form, now: Date): Promise<Outcome> {
+    const invalid = (why: string) => ({ error: new OAuthError('invalid_grant', why) });
+    if (!f.refresh_token || !f.client_id) return invalid('refresh_token and client_id are required');
+    const hash = hashToken(f.refresh_token);
+    const found = await db.oAuthRefresh.findUnique({ where: { tokenHash: hash }, select: { userId: true } });
+    if (!found) return invalid('Unknown refresh token');
+    return db.$transaction(async (tx): Promise<Outcome> => {
+      await lockUser(tx, found.userId);
+      const row = await tx.oAuthRefresh.findUnique({ where: { tokenHash: hash }, include: { client: true, user: true } });
+      if (!row || row.client.clientId !== f.client_id) return invalid('Unknown refresh token');
+      if (row.revokedAt) return invalid('Refresh token revoked');
+      if (row.usedAt) {
+        // Two refreshes at once from one client: not theft. Later reuse of a rotated token is (M20).
+        if (now.getTime() - row.usedAt.getTime() > REFRESH_REUSE_GRACE_MS) await revokeFamily(tx, row.family, now);
+        return invalid('Refresh token already used');
+      }
+      if (row.expiresAt <= now) return invalid('Refresh token expired');
+      if (f.resource !== undefined && f.resource !== resource) return invalid(`resource must be ${resource}`);
+      if (!row.user.isActive) return invalid('The user is no longer active');
+      await tx.oAuthRefresh.update({ where: { id: row.id }, data: { usedAt: now } });
+      return { tokens: await issueTokens(tx, row.client, row.userId, row.scope, row.family, now) };
+    });
   }
 
   app.post('/oauth/token', pub, async (req, reply) => {
     try {
       const f = form(req);
       const now = new Date();
-      let tokens;
-      if (f.grant_type === 'authorization_code') tokens = await exchangeCode(f, now);
-      else if (f.grant_type === 'refresh_token') tokens = await refresh(f, now);
+      let outcome: Outcome;
+      if (f.grant_type === 'authorization_code') outcome = await exchangeCode(f, now);
+      else if (f.grant_type === 'refresh_token') outcome = await refresh(f, now);
       else if (!f.grant_type) throw new OAuthError('invalid_request', 'grant_type is required');
       else throw new OAuthError('unsupported_grant_type', 'Only authorization_code and refresh_token');
-      return reply.header('Cache-Control', 'no-store').header('Pragma', 'no-cache').send(tokens);
+      if ('error' in outcome) throw outcome.error;
+      return reply.header('Cache-Control', 'no-store').header('Pragma', 'no-cache').send(outcome.tokens);
     } catch (err) {
       if (err instanceof OAuthError) return sendOAuthError(reply, err);
       throw err;
@@ -400,7 +420,10 @@ export default async function oauthRoutes(app: FastifyInstance) {
       const hash = hashToken(token);
       const refreshRow = await db.oAuthRefresh.findUnique({ where: { tokenHash: hash } });
       if (refreshRow?.clientId === client.id) {
-        await revokeFamily(db, refreshRow.family, now);
+        await db.$transaction(async (tx) => {
+          await lockUser(tx, refreshRow.userId);
+          await revokeFamily(tx, refreshRow.family, now);
+        });
       } else {
         await db.apiToken.updateMany({ where: { tokenHash: hash, oauthClientId: client.id, revokedAt: null }, data: { revokedAt: now } });
       }
@@ -476,7 +499,7 @@ export async function oauthRequestRoutes(app: FastifyInstance) {
       data: {
         codeHash: code.hash,
         clientId: known.clientId,
-        userId: (req.user as User).id,
+        userId: req.user.id,
         redirectUri: known.redirectUri,
         codeChallenge: known.codeChallenge,
         scope,
@@ -488,4 +511,3 @@ export async function oauthRequestRoutes(app: FastifyInstance) {
   });
 }
 
-export { isMetadataClientId };

@@ -24,6 +24,8 @@ export type FetchPolicy = {
   /** Ports other than 80/443 (tests' fixture servers). */
   allowAnyPort: boolean;
   resolve: (host: string) => Promise<ResolvedAddress[]>;
+  /** Extra trusted CA certificates (PEM) for https (tests' fixture servers); default: the system's. */
+  ca?: string;
 };
 
 export const defaultPolicy: FetchPolicy = {
@@ -109,6 +111,7 @@ async function get(url: URL, policy: FetchPolicy, signal: AbortSignal, accept: s
         method: 'GET',
         agent: false, // no pooled socket from another pin
         signal,
+        ...(policy.ca ? { ca: policy.ca } : {}),
         // The connection goes to the address checked above, never a fresh lookup.
         lookup: (_host, options, callback) => {
           const cb = callback as (...args: unknown[]) => void;
