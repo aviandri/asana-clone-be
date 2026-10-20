@@ -54,18 +54,33 @@ type Form = Record<string, string>;
 const DUPLICATE = Symbol('duplicate');
 
 /**
- * Prunes clients nobody uses (M11): ones that never got a token after a day, any unused for 30 days.
- * CIMD clients too: they are only a cache of their document, refetched on next use.
+ * Prunes clients nobody uses (M11, M32): ones that never got a token, after 1 h (CIMD: only a cache of
+ * its document) or 24 h (DCR); and any unused for 30 days. Never one that is mid-flow: a live request
+ * or an unused live code (they'd cascade away under the user), or a live token.
  */
 export async function pruneOAuthClients(db: Db, now: Date) {
+  const notMidFlow = {
+    requests: { none: { expiresAt: { gt: now } } },
+    codes: { none: { usedAt: null, expiresAt: { gt: now } } },
+  };
   const neverUsed = await db.oAuthClient.deleteMany({
-    where: { createdAt: { lt: new Date(now.getTime() - DAY_MS) }, tokens: { none: {} }, refreshes: { none: {} } },
+    where: {
+      ...notMidFlow,
+      tokens: { none: {} },
+      refreshes: { none: {} },
+      OR: [
+        { source: 'CIMD', createdAt: { lt: new Date(now.getTime() - 60 * 60 * 1000) } },
+        { source: 'DCR', createdAt: { lt: new Date(now.getTime() - DAY_MS) } },
+      ],
+    },
   });
   const cutoff = new Date(now.getTime() - 30 * DAY_MS);
   const unused = await db.oAuthClient.deleteMany({
     where: {
+      ...notMidFlow,
       OR: [{ lastUsedAt: { lt: cutoff } }, { lastUsedAt: null, createdAt: { lt: cutoff } }],
       refreshes: { none: { revokedAt: null, expiresAt: { gt: now } } },
+      tokens: { none: { revokedAt: null, expiresAt: { gt: now } } },
     },
   });
   return neverUsed.count + unused.count;
@@ -136,6 +151,17 @@ export default async function oauthRoutes(app: FastifyInstance) {
   app.addHook('onRequest', async () => {
     if (!enabled) throw notFound('Route');
   });
+  // Every error here, rate limits included, in the RFC 6749 shape (M32).
+  app.setErrorHandler((err: Error & { statusCode?: number }, req, reply) => {
+    const status = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 500;
+    const error =
+      status === 429 ? 'too_many_requests' : status === 404 ? 'not_found' : status === 401 ? 'invalid_client' : status >= 500 ? 'server_error' : 'invalid_request';
+    if (status >= 500) req.log.error({ err }, 'OAuth endpoint failed');
+    return reply
+      .status(status)
+      .header('Cache-Control', 'no-store')
+      .send({ error, error_description: status >= 500 ? 'Internal server error' : err.message });
+  });
   // Metadata and token endpoints are read by browser-based clients too: open CORS, never credentials.
   app.addHook('onSend', async (_req, reply) => {
     reply.header('Access-Control-Allow-Origin', '*');
@@ -158,9 +184,9 @@ export default async function oauthRoutes(app: FastifyInstance) {
   }
 
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string', bodyLimit: 16 * 1024 }, (_req, body, done) => {
-    const form: Form & { [DUPLICATE]?: true } = {};
+    const form: Form & { [DUPLICATE]?: true } = Object.create(null);
     for (const [k, v] of new URLSearchParams(body as string)) {
-      if (k in form) form[DUPLICATE] = true;
+      if (Object.hasOwn(form, k)) form[DUPLICATE] = true;
       form[k] = v;
     }
     done(null, form);
@@ -227,9 +253,10 @@ export default async function oauthRoutes(app: FastifyInstance) {
         return sendOAuthError(reply, new OAuthError('invalid_client_metadata', 'response_types: only code'));
       }
       const now = new Date();
-      if ((await db.oAuthClient.count()) >= MAX_CLIENTS) {
+      // Its own cap: CIMD documents can't crowd out registrations (M32).
+      if ((await db.oAuthClient.count({ where: { source: 'DCR' } })) >= MAX_CLIENTS) {
         await pruneOAuthClients(db, now);
-        if ((await db.oAuthClient.count()) >= MAX_CLIENTS) {
+        if ((await db.oAuthClient.count({ where: { source: 'DCR' } })) >= MAX_CLIENTS) {
           return sendOAuthError(reply, new OAuthError('temporarily_unavailable', 'Too many registered clients; try again later', 503));
         }
       }
@@ -328,7 +355,9 @@ export default async function oauthRoutes(app: FastifyInstance) {
 
   /**
    * Code → tokens. One transaction under the user's lock. Failures after the code is claimed are returned,
-   * not thrown, so the claim (and any revocation) commits: a code is burnt by any attempt.
+   * not thrown, so the claim (and any revocation) commits: any attempt that reaches the code burns it.
+   * Requests that never get that far (missing parameters, an unknown client, a code issued to another
+   * client) leave it alone: they prove nothing about the code's holder.
    */
   async function exchangeCode(f: Form, now: Date): Promise<Outcome> {
     for (const k of ['code', 'redirect_uri', 'client_id', 'code_verifier']) {
@@ -494,7 +523,7 @@ export async function oauthRequestRoutes(app: FastifyInstance) {
     if (claimed.count === 0) throw conflict('This authorization request has already been decided');
     const state = known.state ?? undefined;
     if (!body.approve) return { redirectUrl: withParams(known.redirectUri, { error: 'access_denied', state, iss: base }) };
-    const code = generateToken('mpor');
+    const code = generateToken('mpoc');
     await db.oAuthCode.create({
       data: {
         codeHash: code.hash,

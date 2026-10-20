@@ -6,7 +6,8 @@ import type { ApiToken, OAuthClient, Prisma, PrismaClient, TokenScope, User } fr
  * random bytes (base64url). Only the sha256 is stored; the plaintext is shown once.
  */
 
-export type TokenKind = 'mpat' | 'mpoa' | 'mpor';
+/** PAT, OAuth access, OAuth refresh, OAuth authorization code (M32). */
+export type TokenKind = 'mpat' | 'mpoa' | 'mpor' | 'mpoc';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 

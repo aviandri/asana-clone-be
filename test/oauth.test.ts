@@ -158,7 +158,9 @@ async function codeFor(s: Session, opts: { scope?: string; decision?: object; cl
   const decided = await decide(s, id, opts.decision ?? { approve: true });
   expect(decided.statusCode, decided.body).toBe(200);
   const redirect = new URL(decided.json().redirectUrl);
-  return { clientId, verifier, redirectUri, code: redirect.searchParams.get('code')!, redirect };
+  const code = redirect.searchParams.get('code')!;
+  expect(code, 'codes have their own prefix (M32)').toMatch(/^mpoc_[A-Za-z0-9_-]{43}$/);
+  return { clientId, verifier, redirectUri, code, redirect };
 }
 
 async function grant(s: Session, opts: Parameters<typeof codeFor>[1] = {}) {
@@ -208,6 +210,7 @@ describe('metadata', () => {
     for (const [method, url] of [['GET', '/.well-known/openid-configuration'], ['GET', '/oauth/nope'], ['POST', '/.well-known/x']] as const) {
       const res = await app.inject({ method, url });
       expect(res.statusCode, url).toBe(404);
+      expect(res.json(), url).toEqual({ error: 'not_found', error_description: expect.any(String) });
     }
   });
 
@@ -269,7 +272,10 @@ describe('dynamic client registration', () => {
     try {
       const reg = (ip: string) =>
         limited.inject({ method: 'POST', url: '/oauth/register', headers: { 'x-forwarded-for': ip }, payload: { redirect_uris: [CALLBACK] } });
-      expect([(await reg('198.51.100.1')).statusCode, (await reg('198.51.100.1')).statusCode, (await reg('198.51.100.1')).statusCode]).toEqual([201, 201, 429]);
+      expect([(await reg('198.51.100.1')).statusCode, (await reg('198.51.100.1')).statusCode]).toEqual([201, 201]);
+      const limited429 = await reg('198.51.100.1');
+      expect(limited429.statusCode).toBe(429);
+      expect(limited429.json(), 'RFC 6749 shape (M32)').toEqual({ error: 'too_many_requests', error_description: expect.any(String) });
       expect((await reg('198.51.100.2')).statusCode).toBe(201);
     } finally {
       await limited.close();
@@ -284,6 +290,14 @@ describe('dynamic client registration', () => {
     } finally {
       await limited.close();
     }
+  });
+
+  it('a full DCR cap does not block CIMD (M32)', async () => {
+    await prisma.oAuthClient.createMany({ data: Array.from({ length: MAX_CLIENTS }, (_, i) => ({ clientId: `c${i}`, name: 'x', redirectUris: [CALLBACK] })) });
+    expect((await register()).statusCode).toBe(503);
+    const url = docUrl('/client.json');
+    docs.set('/client.json', { body: JSON.stringify({ client_id: url, client_name: 'Claude Code', redirect_uris: ['http://localhost/callback'] }) });
+    requestId(await authorize(authorizeParams(url, pkce().challenge, { redirect_uri: 'http://localhost/callback' })));
   });
 
   it('prunes stale clients at the cap, else answers 503', async () => {
@@ -562,12 +576,21 @@ describe('refresh rotation', () => {
       payload: `${new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId })}&client_id=${encodeURIComponent(clientId)}`,
     });
     expect(dup.json().error).toBe('invalid_request');
+    // Parameter names that are also Object.prototype keys are not "repeats".
+    const protoNames = await app.inject({
+      method: 'POST',
+      url: '/oauth/token',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: `${new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tokens.refresh_token, client_id: clientId })}&constructor=x&toString=y`,
+    });
+    expect(protoNames.statusCode, protoNames.body).toBe(200);
+    const rotated = protoNames.json().refresh_token as string;
     await prisma.user.update({ where: { id: alice.user.id }, data: { isActive: false } });
     expect((await refreshWith(tokens.refresh_token, clientId)).json().error, 'deactivated user').toBe('invalid_grant');
     await prisma.user.update({ where: { id: alice.user.id }, data: { isActive: true } });
-    expect((await refreshWith(tokens.refresh_token, clientId)).statusCode, 'the token itself was still good').toBe(200);
+    expect((await refreshWith(rotated, clientId)).statusCode, 'the token itself was still good').toBe(200);
     await prisma.oAuthRefresh.updateMany({ data: { expiresAt: new Date(Date.now() - 1) } });
-    expect((await refreshWith(tokens.refresh_token, clientId)).json().error).toBe('invalid_grant');
+    expect((await refreshWith(rotated, clientId)).json().error).toBe('invalid_grant');
   });
 
   it('a refresh racing a password change never leaves a live grant', async () => {
@@ -659,14 +682,18 @@ describe('client ID metadata documents (M11)', () => {
     expect((await authorize(authorizeParams(`http://client.test:${docPort}/client.json`, challenge))).statusCode).toBe(400);
   });
 
-  it('counts against the client cap', async () => {
-    await prisma.oAuthClient.createMany({ data: Array.from({ length: MAX_CLIENTS }, (_, i) => ({ clientId: `c${i}`, name: 'x', redirectUris: [CALLBACK] })) });
+  it('has its own client cap, separate from DCR (M32)', async () => {
+    await prisma.oAuthClient.createMany({
+      data: Array.from({ length: MAX_CLIENTS }, (_, i) => ({ clientId: `https://filler.example/c${i}`, source: 'CIMD' as const, name: 'x', redirectUris: [CALLBACK], cachedAt: new Date() })),
+    });
+    expect((await register()).statusCode, 'a full CIMD cap never blocks registration').toBe(201);
     const url = docUrl('/client.json');
     docs.set('/client.json', { body: doc(url) });
     const res = await authorize(authorizeParams(url, pkce().challenge, { redirect_uri: 'http://localhost/callback' }));
     expect(res.statusCode).toBe(400);
     expect(docHits, 'not even fetched').toBe(0);
-    await prisma.oAuthClient.updateMany({ where: { clientId: { in: ['c0', 'c1'] } }, data: { createdAt: new Date(Date.now() - 2 * DAY) } });
+    // Two never-used CIMD clients older than an hour make room.
+    await prisma.oAuthClient.updateMany({ where: { clientId: { in: ['https://filler.example/c0', 'https://filler.example/c1'] } }, data: { createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000) } });
     requestId(await authorize(authorizeParams(url, pkce().challenge, { redirect_uri: 'http://localhost/callback' })));
   });
 
@@ -708,8 +735,6 @@ describe('sweepOAuth', () => {
     await prisma.apiToken.create({ data: { userId: alice.user.id, name: 'dead', source: 'PAT', scope: 'READ', prefix: 'p', tokenHash: 'dead', revokedAt: old(31 * DAY) } });
     await prisma.apiToken.create({ data: { userId: alice.user.id, name: 'recent', source: 'PAT', scope: 'READ', prefix: 'p', tokenHash: 'recent', revokedAt: old(DAY) } });
 
-    // Unused for a month, but a grant is still live: kept.
-    await prisma.oAuthClient.update({ where: { clientId: live.clientId }, data: { lastUsedAt: old(31 * DAY) } });
     const r = await sweepOAuth(prisma, now);
     expect(r).toMatchObject({ requests: 1, codes: 1, tokens: 1, refreshes: 0, clients: 3 });
     expect(await prisma.oAuthClient.findUnique({ where: { id: cimdNeverUsed.id } })).toBeNull();
@@ -719,5 +744,54 @@ describe('sweepOAuth', () => {
     expect(await prisma.oAuthRequest.findUnique({ where: { id: keepRequest.id } })).not.toBeNull();
     expect(await prisma.apiToken.count({ where: { name: 'recent' } })).toBe(1);
     expect(await mcpStatus(live.tokens.access_token), 'the live grant and its client stay').toBe(404);
+  });
+
+  it('prunes a client unused for 30 days once its grants are dead', async () => {
+    const alice = await signedIn(app);
+    const now = new Date();
+    const old = (ms: number) => new Date(now.getTime() - ms);
+    const client = (clientId: string, lastUsedAt: Date) =>
+      prisma.oAuthClient.create({ data: { clientId, name: 'x', redirectUris: [CALLBACK], createdAt: old(60 * DAY), lastUsedAt } });
+    const refresh = (clientId: string, expiresAt: Date) =>
+      prisma.oAuthRefresh.create({ data: { tokenHash: randomUUID(), prefix: 'mpor_x', family: randomUUID(), clientId, userId: alice.user.id, scope: 'READ', createdAt: old(31 * DAY), expiresAt } });
+    // Last used 31 days ago: its refresh (30 d) has expired.
+    const stale = await client('stale', old(31 * DAY));
+    await refresh(stale.id, old(DAY));
+    // Last used 29 days ago: its refresh is live.
+    const recent = await client('recent', old(29 * DAY));
+    await refresh(recent.id, new Date(now.getTime() + DAY));
+    // Old, but someone is consenting right now.
+    const consenting = await client('consenting', old(31 * DAY));
+    await prisma.oAuthRequest.create({ data: { clientId: consenting.id, redirectUri: CALLBACK, codeChallenge: 'x', scope: 'READ', resource: RESOURCE, expiresAt: new Date(now.getTime() + 60_000) } });
+
+    expect((await sweepOAuth(prisma, now)).clients).toBe(1);
+    expect(await prisma.oAuthClient.findUnique({ where: { id: stale.id } })).toBeNull();
+    expect(await prisma.oAuthClient.findUnique({ where: { id: recent.id } })).not.toBeNull();
+    expect(await prisma.oAuthClient.findUnique({ where: { id: consenting.id } })).not.toBeNull();
+  });
+
+  it('never prunes a never-used client mid-flow; CIMD after 1 h, DCR after 24 h (M32)', async () => {
+    const alice = await signedIn(app);
+    const now = new Date();
+    const old = (ms: number) => new Date(now.getTime() - ms);
+    const HOUR = 60 * 60 * 1000;
+    const make = (clientId: string, source: 'DCR' | 'CIMD', age: number) =>
+      prisma.oAuthClient.create({ data: { clientId, source, name: 'x', redirectUris: [CALLBACK], createdAt: old(age) } });
+    const dcrRequest = await make('dcr-request', 'DCR', 2 * DAY);
+    await prisma.oAuthRequest.create({ data: { clientId: dcrRequest.id, redirectUri: CALLBACK, codeChallenge: 'x', scope: 'READ', resource: RESOURCE, expiresAt: new Date(now.getTime() + 60_000) } });
+    const dcrCode = await make('dcr-code', 'DCR', 2 * DAY);
+    await prisma.oAuthCode.create({ data: { codeHash: 'live-code', clientId: dcrCode.id, userId: alice.user.id, redirectUri: CALLBACK, codeChallenge: 'x', scope: 'READ', resource: RESOURCE, expiresAt: new Date(now.getTime() + 30_000) } });
+    const dcrExpiredRequest = await make('dcr-expired', 'DCR', 2 * DAY);
+    await prisma.oAuthRequest.create({ data: { clientId: dcrExpiredRequest.id, redirectUri: CALLBACK, codeChallenge: 'x', scope: 'READ', resource: RESOURCE, expiresAt: old(60_000) } });
+    const dcrYoung = await make('dcr-young', 'DCR', 2 * HOUR);
+    const cimdOld = await make('https://c.example/old', 'CIMD', 2 * HOUR);
+    const cimdYoung = await make('https://c.example/young', 'CIMD', 30 * 60 * 1000);
+    const cimdRequest = await make('https://c.example/request', 'CIMD', 2 * HOUR);
+    await prisma.oAuthRequest.create({ data: { clientId: cimdRequest.id, redirectUri: CALLBACK, codeChallenge: 'x', scope: 'READ', resource: RESOURCE, expiresAt: new Date(now.getTime() + 60_000) } });
+
+    await sweepOAuth(prisma, now);
+    const left = (await prisma.oAuthClient.findMany({ select: { clientId: true } })).map((c) => c.clientId).sort();
+    expect(left).toEqual(['dcr-code', 'dcr-request', 'dcr-young', 'https://c.example/request', 'https://c.example/young']);
+    void [dcrExpiredRequest, cimdOld, cimdYoung, dcrYoung];
   });
 });
