@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Principal } from '../lib/tokens.js';
-import { INTERNAL_HEADER, withTicket } from './internal.js';
+import { INTERNAL_HEADER, INTERNAL_REMOTE, withTicket } from './internal.js';
 
 /** A tool failure shown to the model: the message starts with the REST error code (SPEC §14). */
 export class ToolError extends Error {}
@@ -58,6 +58,7 @@ export async function rest<T = unknown>(
       ctx.app.inject({
         method,
         url,
+        remoteAddress: INTERNAL_REMOTE,
         headers: {
           [INTERNAL_HEADER]: ticket,
           ...(opts.workspaceId ? { 'x-workspace-id': opts.workspaceId } : {}),

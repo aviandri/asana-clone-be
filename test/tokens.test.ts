@@ -36,8 +36,14 @@ function api(s: Session | null, method: 'GET' | 'POST' | 'DELETE' | 'PATCH', url
   return on.inject({ method, url: `/api/v1${url}`, headers: s ? { cookie: s.cookie } : {}, payload });
 }
 
+/** A JSON-RPC ping to /mcp: 200 when the token is accepted. */
 function mcp(headers: Record<string, string> = {}) {
-  return app.inject({ method: 'POST', url: '/mcp', headers: { 'content-type': 'application/json', ...headers }, payload: '{}' });
+  return app.inject({
+    method: 'POST',
+    url: '/mcp',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers },
+    payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
+  });
 }
 
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
@@ -242,10 +248,10 @@ describe('bearer auth: only on /mcp', () => {
     const grant = await oauthGrant(alice.user);
     for (const token of [pat.token, grant.accessToken]) {
       const res = await mcp(bearer(token));
-      expect(res.statusCode).toBe(404);
-      expect(res.json().error.message).toMatch(/MCP server is not available yet/);
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ jsonrpc: '2.0', id: 1, result: {} });
     }
-    expect((await mcp({ authorization: `bearer ${pat.token}` })).statusCode, 'the scheme is case-insensitive').toBe(404);
+    expect((await mcp({ authorization: `bearer ${pat.token}` })).statusCode, 'the scheme is case-insensitive').toBe(200);
     expect((await mcp(bearer(grant.refreshToken))).statusCode).toBe(401);
     expect((await mcp({ cookie: alice.cookie })).statusCode).toBe(401);
   });
@@ -261,7 +267,7 @@ describe('bearer auth: only on /mcp', () => {
     await prisma.user.update({ where: { id: bob.user.id }, data: { isActive: false } });
     expect((await mcp(bearer(bobs.token))).statusCode).toBe(401);
     await prisma.user.update({ where: { id: bob.user.id }, data: { isActive: true } });
-    expect((await mcp(bearer(bobs.token))).statusCode, 'kept, not revoked (M16)').toBe(404);
+    expect((await mcp(bearer(bobs.token))).statusCode, 'kept, not revoked (M16)').toBe(200);
   });
 
   it('never lets a bearer token drive /api/v1', async () => {
@@ -301,7 +307,7 @@ describe('a password change revokes every token and grant (M17)', () => {
     });
 
     expect((await api(alice, 'PATCH', '/users/me', { name: 'Alice B' })).statusCode).toBe(200);
-    expect((await mcp(bearer(pat.token))).statusCode).toBe(404);
+    expect((await mcp(bearer(pat.token))).statusCode).toBe(200);
 
     const res = await api(alice, 'PATCH', '/users/me', { currentPassword: PASSWORD, newPassword: 'another-password-1' });
     expect(res.statusCode, res.body).toBe(200);
@@ -309,12 +315,12 @@ describe('a password change revokes every token and grant (M17)', () => {
     expect(await prisma.oAuthRefresh.count({ where: { userId: alice.user.id, revokedAt: null } })).toBe(0);
     expect(await prisma.oAuthCode.count({ where: { userId: alice.user.id } })).toBe(0);
     expect((await api(alice, 'GET', '/me/tokens')).json().data).toEqual([]);
-    expect((await mcp(bearer(bobs.token))).statusCode, 'other users keep theirs').toBe(404);
+    expect((await mcp(bearer(bobs.token))).statusCode, 'other users keep theirs').toBe(200);
 
     // A wrong current password changes nothing, so revokes nothing.
     const again = await createPat(alice);
     expect((await api(alice, 'PATCH', '/users/me', { currentPassword: 'wrong', newPassword: 'third-password-1' })).statusCode).toBe(400);
-    expect((await mcp(bearer(again.token))).statusCode).toBe(404);
+    expect((await mcp(bearer(again.token))).statusCode).toBe(200);
   });
 });
 

@@ -1,4 +1,5 @@
 import type { AddressInfo } from 'node:net';
+import { Writable } from 'node:stream';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { User } from '@prisma/client';
@@ -7,7 +8,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { generateToken } from '../src/lib/tokens.js';
-import { takeTicket, withTicket } from '../src/mcp/internal.js';
+import { INTERNAL_REMOTE, takeTicket, withTicket } from '../src/mcp/internal.js';
 import { originAllowed, MCP_RATE_LIMIT } from '../src/routes/mcp.js';
 import { READ_TOOLS, WRITE_TOOLS } from '../src/mcp/tools.js';
 import { addMember, createUser, prisma, signedIn } from './helpers.js';
@@ -23,6 +24,9 @@ beforeAll(async () => {
   base = new URL(`http://127.0.0.1:${(app.server.address() as AddressInfo).port}/mcp`);
 });
 afterAll(async () => {
+  // Clients first, then any keep-alive sockets (SDK clients, fetch), or close() waits on them.
+  await Promise.all(clients.map((c) => c.close().catch(() => undefined)));
+  app.server.closeAllConnections();
   await app.close();
 });
 beforeEach(async () => {
@@ -101,7 +105,7 @@ async function world() {
   const open = await api(alice, 'POST', '/projects', { teamId: team.id, name: 'Open', privacy: 'PUBLIC' });
   await prisma.projectMember.create({ data: { projectId: open.id, userId: bob.user.id, role: 'COMMENTER' } });
   await prisma.projectMember.create({ data: { projectId: launch.id, userId: carol.user.id, role: 'EDITOR' } });
-  const t1 = await api(alice, 'POST', '/tasks', { projectId: launch.id, title: 'Write the plan', assigneeId: bob.user.id, dueDate: '2026-11-01' });
+  const t1 = await api(alice, 'POST', '/tasks', { projectId: launch.id, sectionId: launch.sections[0].id, title: 'Write the plan', assigneeId: bob.user.id, dueDate: '2026-11-01' });
   const hidden = await api(alice, 'POST', '/tasks', { projectId: secret.id, title: 'Secret plan' });
   const openTask = await api(alice, 'POST', '/tasks', { projectId: open.id, title: 'Open task' });
   const personal = await api(alice, 'POST', '/tasks', { title: 'Personal errand' });
@@ -109,10 +113,6 @@ async function world() {
   await addMember(other.id, alice.user.id);
   return { alice, bob, carol, ws, team, launch, secret, open, t1, hidden, openTask, personal, other };
 }
-
-afterAll(async () => {
-  await Promise.all(clients.map((c) => c.close().catch(() => undefined)));
-});
 
 // --- the endpoint ----------------------------------------------------------------------------------
 
@@ -149,7 +149,7 @@ describe('the /mcp endpoint', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/application\/json/);
     expect(res.headers.get('mcp-session-id')).toBeNull();
-    expect((await res.json()).result.tools).toHaveLength(27);
+    expect(((await res.json()) as any).result.tools).toHaveLength(27);
   });
 
   it('405 for GET and DELETE; 401 without a token', async () => {
@@ -182,7 +182,7 @@ describe('the /mcp endpoint', () => {
     expect(statuses.filter((s) => s === 200)).toHaveLength(MCP_RATE_LIMIT);
     const limited = await rpc(a, { jsonrpc: '2.0', id: 0, method: 'ping' });
     expect(limited.status).toBe(429);
-    expect((await limited.json()).error.code).toBe(-32000);
+    expect(((await limited.json()) as any).error.code).toBe(-32000);
     expect((await rpc(b, { jsonrpc: '2.0', id: 0, method: 'ping' })).status, 'per token').toBe(200);
   }, 60_000);
 
@@ -192,16 +192,72 @@ describe('the /mcp endpoint', () => {
       const res = await app.inject({ method: 'GET', url, headers: { cookie: alice.cookie, 'x-mcp-internal-ticket': 'anything' } });
       expect(res.statusCode, url).toBe(400);
     }
-    // A real ticket, but replayed outside the injection it was made for.
-    let leaked = '';
+    // A live ticket sent from the network (a real socket) is refused, and stays unused.
     await withTicket({ userId: alice.user.id, tokenId: 'x', scope: 'WRITE', client: null }, async (ticket) => {
-      leaked = ticket;
-      expect(takeTicket(ticket), 'consumed once').toMatchObject({ userId: alice.user.id });
-      expect(takeTicket(ticket), 'single use').toBeNull();
+      const res = await fetch(new URL('/api/v1/auth/me', base), { headers: { 'x-mcp-internal-ticket': ticket } });
+      expect(res.status).toBe(400);
+      expect(takeTicket(ticket, false), 'not internal').toBeNull();
+      expect(takeTicket(ticket, true), 'consumed once').toMatchObject({ userId: alice.user.id });
+      expect(takeTicket(ticket, true), 'single use').toBeNull();
     });
-    expect(takeTicket(leaked), 'outside its context').toBeNull();
-    const res = await fetch(new URL('/api/v1/auth/me', base), { headers: { 'x-mcp-internal-ticket': leaked } });
-    expect(res.status).toBe(400);
+    // Injected with the internal address but a made-up ticket.
+    const forged = await app.inject({ method: 'GET', url: '/api/v1/auth/me', remoteAddress: INTERNAL_REMOTE, headers: { 'x-mcp-internal-ticket': 'made-up' } });
+    expect(forged.statusCode).toBe(400);
+    // A READ ticket can only GET.
+    const readOnly = await withTicket({ userId: alice.user.id, tokenId: 'x', scope: 'READ', client: null }, (ticket) =>
+      app.inject({ method: 'POST', url: '/api/v1/tasks', remoteAddress: INTERNAL_REMOTE, headers: { 'x-mcp-internal-ticket': ticket }, payload: { title: 'x' } }),
+    );
+    expect([readOnly.statusCode, readOnly.json().error.message]).toEqual([403, 'this token is read-only']);
+    expect(await prisma.task.count()).toBe(0);
+    // Only for /api/v1, only for an active user, only within 30 s.
+    const inject = (claim: { userId: string; scope: 'READ' | 'WRITE' }, url: string) =>
+      withTicket({ tokenId: 'x', client: null, ...claim }, (ticket) =>
+        app.inject({ method: 'GET', url, remoteAddress: INTERNAL_REMOTE, headers: { 'x-mcp-internal-ticket': ticket } }),
+      );
+    expect((await inject({ userId: alice.user.id, scope: 'WRITE' }, '/api/v1/auth/me')).statusCode, 'the happy path').toBe(200);
+    expect((await inject({ userId: alice.user.id, scope: 'WRITE' }, '/health')).statusCode, 'not an /api/v1 route').toBe(400);
+    await prisma.user.update({ where: { id: alice.user.id }, data: { isActive: false } });
+    expect((await inject({ userId: alice.user.id, scope: 'WRITE' }, '/api/v1/auth/me')).statusCode, 'deactivated since').toBe(401);
+    await withTicket({ userId: alice.user.id, tokenId: 'x', scope: 'WRITE', client: null }, async (ticket) => {
+      expect(takeTicket(ticket, true, Date.now() + 31_000), 'expired after 30 s').toBeNull();
+    });
+  });
+});
+
+describe('audit log', () => {
+  it('logs each tool call with via: "mcp", the token, the client and the outcome', async () => {
+    const lines: Record<string, unknown>[] = [];
+    const stream = new Writable({
+      write(chunk, _enc, done) {
+        for (const line of String(chunk).split('\n').filter(Boolean)) lines.push(JSON.parse(line));
+        done();
+      },
+    });
+    const logged = await buildApp({ config: { ...loadConfig(), APP_URL, MCP_ENABLED: true }, prisma, logger: { level: 'info', stream } });
+    try {
+      await logged.listen({ port: 0, host: '127.0.0.1' });
+      const user = await createUser();
+      const token = await pat(user);
+      const row = await prisma.apiToken.findFirstOrThrow({ where: { userId: user.id } });
+      const client = new Client({ name: 'audit', version: '1' });
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(logged.server.address() as AddressInfo).port}/mcp`), {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } },
+        }),
+      );
+      await client.callTool({ name: 'whoami', arguments: {} });
+      await client.callTool({ name: 'get_task', arguments: { taskId: '00000000-0000-4000-8000-000000000000' } });
+      await client.close();
+      const calls = lines.filter((l) => l.msg === 'MCP tool call');
+      expect(calls).toEqual([
+        expect.objectContaining({ via: 'mcp', tokenId: row.id, source: 'PAT', client: null, userId: user.id, tool: 'whoami', ok: true, ms: expect.any(Number) }),
+        expect.objectContaining({ via: 'mcp', tool: 'get_task', ok: false }),
+      ]);
+      expect(JSON.stringify(lines), 'the token never reaches the log').not.toContain(token.slice(5));
+    } finally {
+      logged.server.closeAllConnections();
+      await logged.close();
+    }
   });
 });
 
@@ -268,7 +324,7 @@ describe('permission parity with REST', () => {
     const read = await connect(await pat(w.alice.user, 'READ'));
     expect((await ok(read, 'get_task', { taskId: w.t1.id })).task.title).toBe('Write the plan');
     const res = await rpc(await pat(w.alice.user, 'READ'), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'update_task', arguments: { taskId: w.t1.id, title: 'x' } } });
-    expect((await res.json()).result.content[0].text).toBe('FORBIDDEN: this token is read-only');
+    expect(((await res.json()) as any).result.content[0].text).toBe('FORBIDDEN: this token is read-only');
     expect((await prisma.task.findUniqueOrThrow({ where: { id: w.t1.id } })).title).toBe('Write the plan');
   });
 });
@@ -352,6 +408,9 @@ describe('read tools', () => {
     expect([second.tasks.length, second.nextCursor]).toEqual([5, null]);
     expect(new Set([...first.tasks, ...second.tasks].map((t: { id: string }) => t.id)).size).toBe(30);
     await fails(alice, 'list_tasks', { projectId: w.launch.id, cursor: 'garbage' }, 'VALIDATION: cursor');
+    // A last page that is exactly full has no next cursor.
+    const half = await ok(alice, 'list_tasks', { projectId: w.launch.id, limit: 15 });
+    expect((await ok(alice, 'list_tasks', { projectId: w.launch.id, limit: 15, cursor: half.nextCursor })).nextCursor).toBeNull();
     expect((await ok(alice, 'list_tasks', { projectId: w.launch.id, dueBefore: '2026-10-15' })).tasks).toHaveLength(3);
     expect((await ok(alice, 'list_tasks', { projectId: w.launch.id, assignee: 'bob@example.com' })).tasks.map((t: { id: string }) => t.id)).toEqual([w.t1.id]);
     expect((await ok(await connect(await pat(w.bob.user)), 'my_tasks', {})).tasks.map((t: { id: string }) => t.id)).toEqual([w.t1.id]);
@@ -408,7 +467,7 @@ describe('write tools', () => {
     const w = await world();
     const alice = await connect(await pat(w.alice.user));
     const created = (await ok(alice, 'create_task', { title: 'From Claude', projectId: w.launch.id, assignee: 'bob@example.com', dueDate: '2026-12-01', priority: 'HIGH' })).task;
-    expect(created).toMatchObject({ title: 'From Claude', assignee: { id: w.bob.user.id }, priority: 'HIGH', section: { name: 'To do' } });
+    expect(created).toMatchObject({ title: 'From Claude', assignee: { id: w.bob.user.id }, priority: 'HIGH', section: null });
     expect(created.url).toBe(`${APP_URL}/projects/${w.launch.id}/list?task=${created.id}&workspace=${w.ws}`);
     // The REST side effects happened: bob was notified, the activity was recorded.
     const inbox = await ok(await connect(await pat(w.bob.user)), 'list_notifications');

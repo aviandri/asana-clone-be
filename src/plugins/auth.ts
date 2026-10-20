@@ -4,7 +4,7 @@ import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { User } from '@prisma/client';
 import { AppError, forbidden, unauthorized } from '../errors.js';
-import { INTERNAL_HEADER, takeTicket } from '../mcp/internal.js';
+import { INTERNAL_HEADER, isInternal, takeTicket } from '../mcp/internal.js';
 import { authenticateToken, bearerToken, UsageThrottle, type Principal } from '../lib/tokens.js';
 import type { Member } from '../lib/workspaces.js';
 
@@ -87,7 +87,7 @@ async function authPlugin(app: FastifyInstance, opts: { secret: string; secureCo
    * is a 400 before any route runs. A READ ticket may only read.
    */
   async function authenticateInternal(req: FastifyRequest) {
-    const claim = takeTicket(req.headers[INTERNAL_HEADER]);
+    const claim = takeTicket(req.headers[INTERNAL_HEADER], isInternal(req.raw));
     if (!claim) throw new AppError('VALIDATION', 'Unexpected internal header');
     if (!req.url.startsWith('/api/v1/')) throw new AppError('VALIDATION', 'Unexpected internal header');
     if (claim.scope === 'READ' && req.method !== 'GET') throw forbidden('this token is read-only');

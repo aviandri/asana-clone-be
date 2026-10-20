@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import type { PrismaClient } from '@prisma/client';
 import type { Config } from './config.js';
@@ -51,7 +51,8 @@ export type AppOptions = {
   /** The link-preview fetcher's network policy (tests); default from LINK_PREVIEW_ALLOW_PRIVATE. */
   fetchPolicy?: FetchPolicy;
   prisma?: PrismaClient;
-  logger?: boolean;
+  /** true/false, or Fastify logger options (tests capture log lines with a stream). */
+  logger?: boolean | Exclude<FastifyServerOptions['logger'], undefined>;
   /** Attachment storage; default: the disk driver under STORAGE_DIR. */
   storage?: StorageDriver;
   /** The hourly attachment sweeper (SPEC §13); default on, except under NODE_ENV=test. */
