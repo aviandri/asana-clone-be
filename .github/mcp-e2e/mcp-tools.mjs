@@ -99,6 +99,27 @@ export async function mcpChecks({ BASE, MCP_URL, rest, check, same, projectId, p
     await ok('list_notifications', { workspaceId: wsId, unreadOnly: false }, (sc) => sc.notifications);
     same('every tool was called', [...READ_TOOLS, ...WRITE_TOOLS].filter((n) => !called.has(n)), []);
 
+    // M33 paging: limit + cursor on these lists too. One item per page until nextCursor is null must
+    // give the same ids as one big page, with no repeats.
+    for (const [tool, key, args] of [['list_projects', 'projects', { workspaceId: wsId }], ['list_people', 'people', { workspaceId: wsId }],
+      ['list_goals', 'goals', { workspaceId: wsId }], ['list_teams', 'teams', { workspaceId: wsId }]]) {
+      const all = (await call(tool, { ...args, limit: 100 })).sc?.[key]?.map((x) => x.id) ?? [];
+      const paged = [];
+      let cursor;
+      for (let i = 0; i < 200; i++) {
+        const page = (await call(tool, { ...args, limit: 1, ...(cursor && { cursor }) })).sc;
+        paged.push(...(page?.[key]?.map((x) => x.id) ?? []));
+        cursor = page?.nextCursor;
+        if (!cursor) break;
+      }
+      check(`${tool}: limit 1 + nextCursor pages through all ${all.length} (M33)`, all.length >= 2 && new Set(paged).size === paged.length && JSON.stringify(paged) === JSON.stringify(all),
+        `pages=${paged.length} all=${all.length}`);
+    }
+    const subDetail = (await call('get_task', { taskId: sub?.task?.id })).sc;
+    check('get_task.parent carries its url (M33)', subDetail?.task?.parent?.url?.startsWith(`${BASE}/projects/${projectId}/list?task=${taskId}`), subDetail?.task?.parent?.url);
+    const people = (await call('list_people', { workspaceId: wsId })).sc?.people ?? [];
+    check('people carry url: null (M33)', people.length > 0 && people.every((p) => 'url' in p && p.url === null), JSON.stringify(people[0]));
+
     // Tool errors are results, starting with the REST code.
     const nf = await call('get_task', { taskId: '00000000-0000-4000-8000-000000000000' });
     check('unknown task → tool error NOT_FOUND:', !nf.ok && nf.raw.isError && nf.text.startsWith('NOT_FOUND:'), nf.text.slice(0, 80));
