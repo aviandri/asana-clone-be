@@ -1084,3 +1084,9 @@ admin or invites, or file upload and download.
 - **M28** The exact `GET /api/v1/oauth/requests/:id` shape: `{client: {name: string, redirectHost: string,
   clientIdHost: string | null /* CIMD client_id URL host; null = DCR client */}, requestedScopes: ("read"|"write")[],
   expiresAt: string, isLocalRedirect: boolean, user: Me, workspaces: Workspace[]}`. There is no separate `scopes` field.
+- **M29** `OAUTH_AUTHORIZE_RATE_LIMIT` (default **60 / min per IP**) on `/oauth/authorize`, because a CIMD `client_id`
+  triggers an outbound fetch.
+- **M30** `GET /api/v1/oauth/requests/:id` for a request that's already been decided → `410 GONE` (the FE says "expired or
+  already used"). `409` is only for a second **decision**.
+- **M31** CIMD clients are only a cache of their document. They count against the 1000-client cap and are pruned when
+  they've had no token for 24 h, like DCR clients.
