@@ -38,9 +38,11 @@ export async function mcpChecks({ BASE, MCP_URL, rest, check, same, projectId, p
 
     // ---- tool calls ----
     const called = new Set();
+    const outputs = []; // every tool result, raw, for the token-leak check
     const call = async (name, args = {}) => {
       called.add(name);
       const r = await w.callTool({ name, arguments: args });
+      outputs.push(JSON.stringify(r));
       const text = r.content?.find((c) => c.type === 'text')?.text ?? '';
       return { ok: !r.isError, sc: r.structuredContent, text, raw: r };
     };
@@ -83,7 +85,8 @@ export async function mcpChecks({ BASE, MCP_URL, rest, check, same, projectId, p
     const kr = await rest('POST', `/goals/${goalId}/key-results`, { title: 'KR', metricType: 'NUMBER', targetValue: 10 });
     await ok('post_goal_update', { goalId, status: 'ON_TRACK', body: 'Going well' }, (sc) => sc.update?.id);
     await ok('update_key_result', { keyResultId: kr.json?.id, currentValue: 5 }, (sc) => (sc.keyResult?.currentValue === 5 ? 1 : undefined));
-    await ok('mark_notifications_read', { workspaceId: wsId }, (sc) => sc.marked);
+    const mk = await ok('mark_notifications_read', { workspaceId: wsId }, (sc) => sc.marked);
+    check('mark_notifications_read → {marked, workspaceIds[]} (M33)', (typeof mk?.marked === 'number' || mk?.marked === 'all') && Array.isArray(mk?.workspaceIds) && mk.workspaceIds.includes(wsId), JSON.stringify(mk));
 
     // Reads over what was just written.
     const lt = await ok('list_tasks', { projectId }, (sc) => sc.tasks?.find((x) => x.id === taskId));
@@ -125,6 +128,10 @@ export async function mcpChecks({ BASE, MCP_URL, rest, check, same, projectId, p
     check('unknown task → tool error NOT_FOUND:', !nf.ok && nf.raw.isError && nf.text.startsWith('NOT_FOUND:'), nf.text.slice(0, 80));
     const val = await call('update_task', { taskId, assignee: 'nobody-here@example.invalid' });
     check('unknown person → tool error', !val.ok && /^(VALIDATION|NOT_FOUND):/.test(val.text), val.text.slice(0, 80));
+    // Tools reach REST through an allowlist (M33, unit-tested in the BE); end to end, no tool output
+    // may ever carry a token of any kind.
+    const leaks = outputs.filter((o) => /mp(at|oa|or|oc)_[A-Za-z0-9_-]{8,}/.test(o)).length;
+    same(`no tool output contains an mpat_/mpoa_/mpor_/mpoc_ token (${outputs.length} results)`, leaks, 0);
   } finally {
     await w.close().catch(() => {});
   }
