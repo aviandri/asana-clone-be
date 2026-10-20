@@ -56,6 +56,10 @@ jobs:
   contract:
     # FE↔BE contract smoke: the FE repo's zero-dependency script exercises every endpoint the
     # frontend calls against this BE (migrated + seeded) and checks shapes against SPEC §5.
+    # It goes through the FE repo's production nginx config (deploy/nginx.conf.template), so the
+    # §13 upload limits are tested end to end. Two extra backends on the same DB give the §13 A12
+    # cases: :3001 with UPLOAD_RATE_LIMIT_MAX=3 (429) and :3002 with an impossible
+    # STORAGE_MIN_FREE_BYTES (507).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -79,9 +83,11 @@ jobs:
       APP_TIMEZONE: Asia/Jakarta
       NODE_ENV: development
       PORT: "3000"
-      HOST: 127.0.0.1
+      # Reachable from the nginx container (via host-gateway); the runner isn't exposed.
+      HOST: 0.0.0.0
       # The script logs in 4 times; the default (10/min) is enough, but leave headroom.
       AUTH_RATE_LIMIT_MAX: "50"
+      LINK_PREVIEW_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -92,14 +98,20 @@ jobs:
       - run: npx prisma migrate deploy
       - run: npm run build
       - run: npm run seed
-      - name: Start backend
+      - name: Start backends
         run: |
+          export STORAGE_DIR="$RUNNER_TEMP/attachments"
           nohup npm start > be.log 2>&1 &
-          for i in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:3000/health && exit 0
-            sleep 1
+          PORT=3001 UPLOAD_RATE_LIMIT_MAX=3 nohup npm start > be-limits.log 2>&1 &
+          PORT=3002 STORAGE_MIN_FREE_BYTES=1000000000000000000 nohup npm start > be-full.log 2>&1 &
+          for port in 3000 3001 3002; do
+            ok=
+            for i in $(seq 1 30); do
+              curl -fsS "http://127.0.0.1:$port/health" >/dev/null && { ok=1; break; }
+              sleep 1
+            done
+            [ -n "$ok" ] || { echo "backend :$port did not become healthy"; cat be*.log; exit 1; }
           done
-          echo "backend did not become healthy"; cat be.log; exit 1
       - uses: actions/checkout@v4
         with:
           repository: aviandri/asana-clone-fe
@@ -108,21 +120,54 @@ jobs:
           token: ${{ secrets.FE_REPO_TOKEN || github.token }}
           ref: ${{ inputs.fe_ref || 'main' }}
           path: fe
-          sparse-checkout: scripts
-      - name: Run contract smoke
+          sparse-checkout: |
+            scripts
+            deploy
+      - name: Start nginx with the FE repo's config
+        run: |
+          docker run -d --name nginx --add-host=host.docker.internal:host-gateway \
+            -e BACKEND_URL=http://host.docker.internal:3000 \
+            -v "$PWD/fe/deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro" \
+            -p 8080:80 nginx:1.27-alpine
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/health && exit 0
+            sleep 1
+          done
+          echo "nginx → backend did not become ready"; docker logs nginx; exit 1
+      - name: Run contract smoke (through nginx)
         env:
-          BASE_URL: http://127.0.0.1:3000
+          BASE_URL: http://127.0.0.1:8080
+          # nginx's client_max_body_size on the upload routes (105m): the smoke checks the band
+          # between it and MAX_UPLOAD_BYTES gets the backend's 413, and above it nginx's.
+          NGINX_MAX_BODY: "110100480"
+          LIMITS_URL: http://127.0.0.1:3001
+          FULL_URL: http://127.0.0.1:3002
         run: |
           test -f fe/scripts/contract-smoke.mjs || { echo "fe/scripts/contract-smoke.mjs not found on asana-clone-fe@${{ inputs.fe_ref || 'main' }}"; exit 1; }
           node fe/scripts/contract-smoke.mjs
-      - name: Backend log
+      - name: Backend and nginx logs
         if: always()
-        run: cat be.log || true
+        run: |
+          for f in be.log be-limits.log be-full.log; do echo "::group::$f"; cat "$f" || true; echo "::endgroup::"; done
+          echo "::group::nginx"; docker logs nginx 2>&1 | tail -200 || true; echo "::endgroup::"
 
   upgrade:
-    # Upgrade path for real deployments: build a database with the last pre-v1.2 release (migrate +
-    # seed), migrate it with this commit, then check the §12 workspace backfill lost nothing.
-    # Bump PRE_UPGRADE_REF to the previous release when a later version changes the schema.
+    # Upgrade path for real deployments: build a database at an earlier release (migrate + seed),
+    # migrate it with this commit, then check nothing was lost and the new schema is in place:
+    # from v1.2 (the current release: the §13 attachments migration) and from v1.1 (the §12
+    # workspace backfill, then everything after it in one go). When a release changes the schema,
+    # add it here as the newest `from`.
+    name: upgrade (from ${{ matrix.from }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # main at the v1.2 release (what the preview runs).
+          - from: v1.2
+            ref: 8bd553fff7b30a4592223902ec35bc44bedd6b21
+          # main just before v1.2 (merge of the §12 spec, no workspace code yet).
+          - from: v1.1
+            ref: 179bbfe134fd50b5cbdfc7808244b56ff7e81615
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -140,8 +185,7 @@ jobs:
           --health-timeout 3s
           --health-retries 20
     env:
-      # main just before v1.2 (merge of the §12 spec, no workspace code yet).
-      PRE_UPGRADE_REF: 179bbfe134fd50b5cbdfc7808244b56ff7e81615
+      PRE_UPGRADE_REF: ${{ matrix.ref }}
       DATABASE_URL: postgresql://postgres:postgres@localhost:5433/asana_upgrade
       JWT_SECRET: ci-only-secret-at-least-16-chars
       APP_URL: http://localhost:5173
@@ -164,7 +208,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             old/package-lock.json
-      - name: Build a database at the pre-v1.2 release
+      - name: Build a database at ${{ matrix.from }}
         working-directory: old
         run: |
           npm ci
@@ -176,9 +220,9 @@ jobs:
       - run: npm ci
       - name: Migrate to this commit (through the image's entrypoint)
         run: sh deploy/docker-entrypoint.sh true
-      - name: Verify the backfill
+      - name: Verify nothing was lost and the new schema
         run: .github/scripts/upgrade-check.sh verify
-      - name: Log in on the upgraded data
+      - name: Log in and attach a file on the upgraded data
         run: |
           npm run build
           nohup npm start > be.log 2>&1 &
@@ -199,7 +243,32 @@ jobs:
               console.log("alice is", me.role, "in", want + ";", projects.data.length, "projects visible");
             } else {
               console.log("pre-v1.2 /auth/me shape; login works");
-            }'
+            }
+            // §13 on migrated data: an old task has no attachments, and a file attaches to it
+            // (storage + sharp thumbnail work against rows that predate the migration).
+            // A task in a project alice can edit (task-level uploads need EDITOR or OWNER).
+            const mine = await (await fetch(base + "/me/tasks", { headers: { cookie } })).json();
+            let old;
+            for (const t of mine.data ?? []) {
+              if (!t.projectId) continue;
+              const p = await (await fetch(base + "/projects/" + t.projectId, { headers: { cookie } })).json();
+              if (p.myRole === "OWNER" || p.myRole === "EDITOR") { old = t; break; }
+            }
+            if (!old) throw new Error("no task of alice in a project she can edit; the seed changed?");
+            const detail = await (await fetch(base + "/tasks/" + old.id, { headers: { cookie } })).json();
+            if (detail.attachmentCount !== 0 || !Array.isArray(detail.attachments) || detail.attachments.length)
+              throw new Error("migrated task: attachments " + JSON.stringify([detail.attachmentCount, detail.attachments]));
+            const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEElEQVQImWN4oFoPRww4OQBnahIxmSyV7AAAAABJRU5ErkJggg==", "base64");
+            const form = new FormData();
+            form.append("file", new Blob([png], { type: "image/png" }), "upgrade.png");
+            const up = await fetch(base + "/tasks/" + old.id + "/attachments", { method: "POST", headers: { cookie }, body: form });
+            const a = await up.json();
+            if (up.status !== 201 || a.mimeType !== "image/png" || !a.hasThumbnail) throw new Error("upload " + up.status + " " + JSON.stringify(a));
+            const thumb = await fetch("http://127.0.0.1:3000" + a.thumbnailPath + "?size=small", { headers: { cookie } });
+            if (thumb.status !== 200 || thumb.headers.get("content-type") !== "image/webp") throw new Error("thumbnail " + thumb.status);
+            const del = await fetch(base + "/attachments/" + a.id, { method: "DELETE", headers: { cookie } });
+            if (del.status !== 204) throw new Error("delete " + del.status);
+            console.log("§13: attached, thumbnailed and deleted a PNG on migrated task", old.id);'
       - name: Backend log
         if: always()
         run: cat be.log || true
@@ -226,16 +295,7 @@ jobs:
       - name: sharp thumbnails a PNG in the runtime image
         run: |
           set -euo pipefail
-          run_smoke() { docker run --rm -v "$PWD/.github/scripts:/smoke:ro" "$@" asana-clone-be:ci /smoke/sharp-smoke.cjs; }
-          if node -e 'process.exit(require("./package.json").dependencies?.sharp ? 0 : 1)'; then
-            run_smoke --entrypoint node
-          else
-            # Until the attachments PR adds sharp: prove its prebuilt binary loads on this base
-            # image by installing it into a throwaway container (nothing is persisted).
-            echo "::warning::sharp is not a dependency yet; probing a throwaway install on the runtime image"
-            docker run --rm -u root -v "$PWD/.github/scripts:/smoke:ro" --entrypoint sh asana-clone-be:ci \
-              -c 'npm install --no-save --no-audit --no-fund sharp@^0.35 >/dev/null && node /smoke/sharp-smoke.cjs'
-          fi
+          docker run --rm -v "$PWD/.github/scripts:/smoke:ro" --entrypoint node asana-clone-be:ci /smoke/sharp-smoke.cjs
       - name: Attachments volume is writable by the app user
         run: |
           set -euo pipefail
