@@ -4,6 +4,7 @@ import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { User } from '@prisma/client';
 import { forbidden, unauthorized } from '../errors.js';
+import { authenticateToken, bearerToken, UsageThrottle, type Principal } from '../lib/tokens.js';
 import type { Member } from '../lib/workspaces.js';
 
 export const SESSION_COOKIE = 'sid';
@@ -17,6 +18,15 @@ declare module 'fastify' {
   interface FastifyContextConfig {
     /** Route needs no session (login, accept-invite, health). */
     public?: boolean;
+    /**
+     * Route authenticates with `Authorization: Bearer` (a PAT or OAuth access token) and never with the
+     * cookie. Only /mcp (SPEC §14): /api/v1 stays cookie-only, so a leaked token can't drive the REST API.
+     */
+    bearer?: boolean;
+  }
+  interface FastifyRequest {
+    /** The token behind the request, on `bearer` routes. */
+    principal?: Principal;
   }
 }
 
@@ -28,7 +38,7 @@ declare module '@fastify/jwt' {
   }
 }
 
-async function authPlugin(app: FastifyInstance, opts: { secret: string; secureCookie: boolean }) {
+async function authPlugin(app: FastifyInstance, opts: { secret: string; secureCookie: boolean; appUrl: string }) {
   await app.register(cookie);
   await app.register(jwt, { secret: opts.secret, sign: { expiresIn: SESSION_TTL_SECONDS } });
 
@@ -47,9 +57,34 @@ async function authPlugin(app: FastifyInstance, opts: { secret: string; secureCo
     reply.clearCookie(SESSION_COOKIE, { path: '/' });
   });
 
+  const usage = new UsageThrottle();
+  // What tells an MCP client (claude.ai) where to start OAuth (RFC 9728).
+  const challenge = `Bearer resource_metadata="${opts.appUrl}/.well-known/oauth-protected-resource/mcp"`;
+
+  async function authenticateBearer(req: FastifyRequest, reply: FastifyReply) {
+    // error="invalid_token" only for a Bearer credential that failed (RFC 6750 §3.1), not for other schemes.
+    const sent = /^bearer(\s|$)/i.test(req.headers.authorization?.trim() ?? '');
+    const token = bearerToken(req.headers.authorization);
+    const now = new Date();
+    const principal = token ? await authenticateToken(app.db, token, now) : null;
+    if (!principal) {
+      reply.header('WWW-Authenticate', sent ? `${challenge}, error="invalid_token"` : challenge);
+      throw unauthorized(sent ? 'Invalid, expired or revoked token' : 'A bearer token is required');
+    }
+    req.user = principal.user;
+    req.principal = principal;
+    if (usage.due(principal.token.id, now.getTime())) {
+      // Best effort, off the request path: a missed lastUsedAt write is not worth failing a call over.
+      app.db.apiToken
+        .update({ where: { id: principal.token.id }, data: { lastUsedAt: now } })
+        .catch((err: unknown) => req.log.warn({ err }, 'lastUsedAt update failed'));
+    }
+  }
+
   // Every route requires a session unless it opts out with `config: { public: true }`.
-  app.addHook('onRequest', async (req: FastifyRequest) => {
+  app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     if (req.routeOptions.config?.public) return;
+    if (req.routeOptions.config?.bearer) return authenticateBearer(req, reply);
     const token = req.cookies[SESSION_COOKIE];
     if (!token) throw unauthorized();
     let userId: string;

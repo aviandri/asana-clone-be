@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { notFound, validation } from '../errors.js';
 import { hashPassword, verifyPassword } from '../lib/password.js';
+import { revokeEverything } from '../lib/tokens.js';
 import { toUser, toUserSummary, userSummarySelect } from '../lib/serialize.js';
 import { hexColor, idParams, parse, password } from '../lib/validate.js';
 import { currentMember, loadMe, pickableUsersWhere } from '../lib/workspaces.js';
@@ -55,9 +56,14 @@ export default async function userRoutes(app: FastifyInstance) {
       }
       passwordHash = await hashPassword(body.newPassword);
     }
-    const user = await app.db.user.update({
-      where: { id: req.user.id },
-      data: { name: body.name, avatarColor: body.avatarColor, passwordHash },
+    const user = await app.db.$transaction(async (tx) => {
+      const updated = await tx.user.update({
+        where: { id: req.user.id },
+        data: { name: body.name, avatarColor: body.avatarColor, passwordHash },
+      });
+      // A new password cuts off every token and connected app too (SPEC §14 M17).
+      if (passwordHash) await revokeEverything(tx, req.user.id, new Date());
+      return updated;
     });
     return loadMe(app.db, user, { req });
   });

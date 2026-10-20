@@ -45,6 +45,10 @@ services:
       STORAGE_DIR: /data/attachments
       # Link preview fetching; false keeps link cards but skips fetching titles/images.
       LINK_PREVIEW_ENABLED: ${LINK_PREVIEW_ENABLED:-true}
+      # The MCP server for Claude (SPEC §14); needs an https APP_URL reachable from the internet.
+      MCP_ENABLED: ${MCP_ENABLED:-false}
+      # nginx (fe) is the one proxy hop and overwrites X-Forwarded-For.
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
       NODE_ENV: production
       PORT: "3000"
       HOST: 0.0.0.0

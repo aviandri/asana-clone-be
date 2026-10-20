@@ -10,6 +10,12 @@ function isValidTimeZone(tz: string) {
   }
 }
 
+/** https, or (outside production) plain http on a loopback host for dev and tests. */
+function isSecureOrLocal(url: string, production: boolean) {
+  const u = new URL(url);
+  return u.protocol === 'https:' || (!production && u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname));
+}
+
 const envBool = (fallback: boolean) =>
   z
     .enum(['true', 'false', '1', '0'])
@@ -20,9 +26,19 @@ const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: z.string().min(16, 'JWT_SECRET must be at least 16 characters'),
-  APP_URL: z.string().url().default('http://localhost:5173'),
+  /** The public origin of the app (SPEC §14 M1: also the OAuth issuer, the MCP resource base and deep links). */
+  APP_URL: z
+    .string()
+    .url()
+    .default('http://localhost:5173')
+    .transform((u) => u.replace(/\/+$/, '')),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
+  /**
+   * Proxies in front of the BE that set X-Forwarded-For (SPEC §14 M2). Each overwrites it with one entry, so only
+   * that many hops are trusted and a client-sent XFF can't pick its own rate-limit bucket. 0 = no proxy.
+   */
+  TRUST_PROXY_HOPS: z.coerce.number().int().nonnegative().default(1),
   /** Per-IP attempts per minute on POST /auth/login and /auth/accept-invite. */
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
   /** IANA zone for "today", current goal periods and report bucketing (SPEC §11). */
@@ -51,7 +67,14 @@ const EnvSchema = z.object({
   LINK_PREVIEW_ENABLED: envBool(true),
   /** TESTS ONLY: let the preview fetcher reach private addresses and any port. Refused in production. */
   LINK_PREVIEW_ALLOW_PRIVATE: envBool(false),
-}).refine((c) => !(c.NODE_ENV === 'production' && c.LINK_PREVIEW_ALLOW_PRIVATE), {
+  /** The MCP server, its OAuth endpoints and personal access tokens (SPEC §14). Needs an https APP_URL. */
+  MCP_ENABLED: envBool(false),
+})
+  .refine((c) => !c.MCP_ENABLED || isSecureOrLocal(c.APP_URL, c.NODE_ENV === 'production'), {
+    message: 'MCP_ENABLED needs an https APP_URL (http only for localhost / 127.0.0.1, and not in production)',
+    path: ['APP_URL'],
+  })
+  .refine((c) => !(c.NODE_ENV === 'production' && c.LINK_PREVIEW_ALLOW_PRIVATE), {
   message: 'must not be set in production (it lets link previews reach the internal network)',
   path: ['LINK_PREVIEW_ALLOW_PRIVATE'],
 });
