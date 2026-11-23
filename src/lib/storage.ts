@@ -38,7 +38,7 @@ export interface StorageDriver {
   sweepTemps?(olderThan: Date): Promise<void>;
 }
 
-const KEY = /^[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f-]{36}(\.[a-z]\.webp)?$/;
+export const KEY = /^[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f-]{36}(\.[a-z]\.webp)?$/;
 
 /** `ab/cd/<uuid>`: random, and spread over 65,536 directories. */
 export function newStorageKey(): string {
@@ -61,7 +61,7 @@ export const payloadTooLarge = (maxBytes: number) =>
   new AppError('PAYLOAD_TOO_LARGE', `Files can be at most ${Math.floor(maxBytes / (1024 * 1024))} MB`);
 
 /** Counts, hashes and keeps the head of the bytes on their way through; over `maxBytes` fails the pipeline. */
-function meter({ maxBytes = Number.MAX_SAFE_INTEGER, headBytes = 0 }: PutOptions) {
+export function meter({ maxBytes = Number.MAX_SAFE_INTEGER, headBytes = 0 }: PutOptions) {
   const hash = createHash('sha256');
   const head: Buffer[] = [];
   let size = 0;
