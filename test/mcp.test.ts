@@ -105,7 +105,7 @@ async function world() {
   const open = await api(alice, 'POST', '/projects', { teamId: team.id, name: 'Open', privacy: 'PUBLIC' });
   await prisma.projectMember.create({ data: { projectId: open.id, userId: bob.user.id, role: 'COMMENTER' } });
   await prisma.projectMember.create({ data: { projectId: launch.id, userId: carol.user.id, role: 'EDITOR' } });
-  const t1 = await api(alice, 'POST', '/tasks', { projectId: launch.id, sectionId: launch.sections[0].id, title: 'Write the plan', assigneeId: bob.user.id, dueDate: '2026-11-01' });
+  const t1 = await api(alice, 'POST', '/tasks', { projectId: launch.id, sectionId: launch.sections[0].id, title: 'Write the plan', assigneeId: bob.user.id, dueDate: '2099-11-01' });
   const hidden = await api(alice, 'POST', '/tasks', { projectId: secret.id, title: 'Secret plan' });
   const openTask = await api(alice, 'POST', '/tasks', { projectId: open.id, title: 'Open task' });
   const personal = await api(alice, 'POST', '/tasks', { title: 'Personal errand' });
@@ -417,7 +417,7 @@ describe('read tools', () => {
       title: 'Write the plan',
       truncated: false,
       assignee: { id: w.bob.user.id, name: 'Bob' },
-      dueDate: '2026-11-01',
+      dueDate: '2099-11-01',
       project: { id: w.launch.id, name: 'Launch' },
       section: { id: w.launch.sections[0].id, name: 'To do' },
       url: `${APP_URL}/projects/${w.launch.id}/list?task=${w.t1.id}&workspace=${w.ws}`,
