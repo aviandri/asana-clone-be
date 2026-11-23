@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
-import { upsertAdmin } from '../src/lib/bootstrap.js';
+import { bootstrapFirstAdmin, upsertAdmin } from '../src/lib/bootstrap.js';
 import { createUser, login, prisma, setupApp } from './helpers.js';
 
 const ctx = setupApp();
@@ -41,6 +41,38 @@ describe('upsertAdmin (npm run create-admin)', () => {
 
   it('needs a name and password to create', async () => {
     await expect(upsertAdmin(prisma, { email: 'new@example.com' })).rejects.toThrow(/--name and --password/);
+  });
+});
+
+describe('bootstrapFirstAdmin (BOOTSTRAP_ADMIN_* on start)', () => {
+  const input = { email: 'first@example.com', name: 'First', password: 'first-password' };
+
+  it('creates the admin on an empty database', async () => {
+    const result = await bootstrapFirstAdmin(prisma, input);
+    expect(result.status).toBe('created');
+    expect(await prisma.workspaceMember.findFirstOrThrow({ where: { user: { email: 'first@example.com' } } })).toMatchObject({
+      role: 'ADMIN',
+      isActive: true,
+    });
+    expect(await login(ctx.app, 'first@example.com', 'first-password')).toMatch(/^sid=/);
+  });
+
+  it('does nothing once any user exists, so a restart never resets the password', async () => {
+    await bootstrapFirstAdmin(prisma, input);
+    const before = await prisma.user.findUniqueOrThrow({ where: { email: 'first@example.com' } });
+    expect(await bootstrapFirstAdmin(prisma, { ...input, password: 'changed-password' })).toEqual({ status: 'skipped' });
+    expect((await prisma.user.findUniqueOrThrow({ where: { email: 'first@example.com' } })).passwordHash).toBe(before.passwordHash);
+
+    await prisma.user.deleteMany({ where: { email: 'first@example.com' } });
+    await createUser({ email: 'someone@example.com' });
+    expect(await bootstrapFirstAdmin(prisma, input)).toEqual({ status: 'skipped' });
+    expect(await prisma.user.findUnique({ where: { email: 'first@example.com' } })).toBeNull();
+  });
+
+  it('two replicas racing on a fresh database end with one admin and no error', async () => {
+    const results = await Promise.all([bootstrapFirstAdmin(prisma, input), bootstrapFirstAdmin(prisma, input)]);
+    expect(results.map((r) => r.status).sort()).toEqual(expect.arrayContaining(['created']));
+    expect(await prisma.user.count({ where: { email: 'first@example.com' } })).toBe(1);
   });
 });
 

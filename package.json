@@ -20,6 +20,7 @@
     "db:generate": "prisma generate",
     "postinstall": "prisma generate",
     "create-admin": "node dist/scripts/create-admin.js",
+    "bootstrap-admin": "node dist/scripts/bootstrap-admin.js",
     "create-admin:dev": "tsx src/scripts/create-admin.ts",
     "seed": "node dist/scripts/seed.js",
     "seed:dev": "tsx src/scripts/seed.ts"

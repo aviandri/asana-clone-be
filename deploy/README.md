@@ -53,6 +53,11 @@ The user becomes ADMIN of the default workspace (`DEFAULT_WORKSPACE_NAME`, defau
 which is created if the database has none. Then log in and invite everyone else from
 **Workspace settings → Invites**.
 
+No shell on the platform (e.g. Mekari OneDeploy, see [ONEDEPLOY.md](ONEDEPLOY.md))? Set
+`BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_NAME` and `BOOTSTRAP_ADMIN_PASSWORD` instead. The entrypoint
+then creates that admin after migrating, **only while the database has no users**, so restarts never
+reset anyone's password. Remove the password variable once you've logged in.
+
 For a demo/staging stack you can load sample data instead (`docker compose exec be npm run seed`,
 once the backend ships a compiled seed script). The seed creates `admin@example.com` /
 `password123`, so never use it on anything reachable.

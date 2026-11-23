@@ -1,0 +1,56 @@
+name: Mirror to Bitbucket
+
+# Mekari OneDeploy builds only from Bitbucket, so main is mirrored there once CI passes on it
+# (GitHub stays the source of truth). Setup, once per repo:
+#   - repository variable BITBUCKET_REPO = <workspace>/<repo> (e.g. mekari/asana-clone-be)
+#   - repository secret   BITBUCKET_TOKEN = a Bitbucket repository access token with write access
+# Until both exist the job only prints a notice.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-bitbucket
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BITBUCKET_REPO: ${{ vars.BITBUCKET_REPO }}
+      BITBUCKET_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Check configuration
+        id: cfg
+        run: |
+          if [ -z "$BITBUCKET_REPO" ] || [ -z "$BITBUCKET_TOKEN" ]; then
+            echo "::notice::BITBUCKET_REPO / BITBUCKET_TOKEN not set; skipping the mirror."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.cfg.outputs.skip != 'true'
+        with:
+          ref: ${{ env.SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Push to Bitbucket main
+        if: steps.cfg.outputs.skip != 'true'
+        run: |
+          set -eu
+          remote="https://x-token-auth:${BITBUCKET_TOKEN}@bitbucket.org/${BITBUCKET_REPO}.git"
+          # A slower, older run must not move Bitbucket backwards: skip when it already has this commit.
+          if git fetch --quiet "$remote" main 2>/dev/null && git merge-base --is-ancestor "$SHA" FETCH_HEAD; then
+            echo "Bitbucket main already contains $SHA"; exit 0
+          fi
+          git push "$remote" "$SHA:refs/heads/main"
+          echo "Mirrored $SHA to bitbucket.org/${BITBUCKET_REPO} main"
