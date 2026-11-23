@@ -22,16 +22,19 @@ concurrency:
 
 jobs:
   mirror:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    # Manual runs only from main: a dispatch on a feature branch would otherwise ship that branch to
+    # Bitbucket main, which OneDeploy's webhook deploys.
+    if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       BITBUCKET_REPO: ${{ vars.BITBUCKET_REPO }}
-      BITBUCKET_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
       SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - name: Check configuration
         id: cfg
+        env:
+          BITBUCKET_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
         run: |
           if [ -z "$BITBUCKET_REPO" ] || [ -z "$BITBUCKET_TOKEN" ]; then
             echo "::notice::BITBUCKET_REPO / BITBUCKET_TOKEN not set; skipping the mirror."
@@ -45,6 +48,8 @@ jobs:
           persist-credentials: false
       - name: Push to Bitbucket main
         if: steps.cfg.outputs.skip != 'true'
+        env:
+          BITBUCKET_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
         run: |
           set -eu
           remote="https://x-token-auth:${BITBUCKET_TOKEN}@bitbucket.org/${BITBUCKET_REPO}.git"

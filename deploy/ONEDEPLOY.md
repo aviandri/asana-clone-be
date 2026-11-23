@@ -33,8 +33,11 @@ Platform facts this guide relies on (checked 2026-11-23, OneDeploy v2.21.0):
 ## 1. Attachments bucket
 
 Ask the OneDeploy/infra team for a **private** Alibaba OSS bucket (or any S3-compatible one) and an
-access key limited to it. Add a lifecycle rule that aborts incomplete multipart uploads after 1 day,
-and turn on versioning (that's the attachment backup). See the README's S3 storage section.
+access key limited to it (object get/put/delete, multipart, and list on the bucket). Add lifecycle
+rules that abort incomplete multipart uploads after 1 day and expire noncurrent versions after ~30
+days, and turn on versioning (that's the attachment backup). See the README's S3 storage section.
+The S3 driver has only been tested against a mocked client, so before inviting anyone, do step 4.4
+(upload, redeploy, reopen).
 
 Without a bucket the backend still runs on the default `disk` driver, but **every redeploy or
 restart deletes all uploaded files**. Only acceptable for a throwaway trial.
@@ -68,8 +71,8 @@ Environment variables (🔒 = toggle **Secret**):
 | 🔒 `BOOTSTRAP_ADMIN_PASSWORD` | a strong password (at least 8 characters) |
 | `STORAGE_DRIVER` | `s3` |
 | `S3_BUCKET` | the bucket name |
-| `S3_ENDPOINT` | e.g. `https://oss-ap-southeast-5.aliyuncs.com` |
-| `S3_REGION` | e.g. `oss-ap-southeast-5`. Check against the bucket; see the S3 section of the README |
+| `S3_ENDPOINT` | Alibaba OSS: `https://s3.oss-<region>.aliyuncs.com`, e.g. `https://s3.oss-ap-southeast-5.aliyuncs.com` |
+| `S3_REGION` | the bucket's region without the `oss-` prefix, e.g. `ap-southeast-5` (required with `S3_ENDPOINT`) |
 | `S3_PREFIX` | `attachments/` |
 | 🔒 `S3_ACCESS_KEY_ID` / 🔒 `S3_SECRET_ACCESS_KEY` | the bucket key |
 
@@ -98,8 +101,9 @@ Environment variables (🔒 = toggle **Secret**):
 | `REAL_IP_FROM` | the cluster's pod/node CIDR(s) the ingress connects from, e.g. `10.0.0.0/8` (ask the platform team) |
 
 `BACKEND_URL`: the in-cluster address keeps the client IP intact (ingress → fe → be). It assumes the
-Service is named after the app and no NetworkPolicy blocks cross-namespace traffic; neither is
-documented. If the frontend logs `502` / `host not found`, use `https://project-api.mekari.io`
+Service is named after the app, exposes port 3000 (check the Service manifest in the review step;
+if it maps `port: 80` → `targetPort: 3000`, drop `:3000` from the URL), and no NetworkPolicy blocks
+cross-namespace traffic. None of that is documented. If the frontend logs `502` / `host not found`, use `https://project-api.mekari.io`
 instead. That works too, but the backend ingress then reports the frontend pod as the client, so all
 users share one login rate-limit bucket.
 
