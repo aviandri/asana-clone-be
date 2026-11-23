@@ -13,4 +13,9 @@ if [ "${SKIP_MIGRATIONS:-false}" != "true" ]; then
   fi
   npx --no-install prisma migrate deploy
 fi
+if [ -n "${BOOTSTRAP_ADMIN_EMAIL:-}" ]; then
+  # First admin on an empty database, for platforms without a shell (see deploy/ONEDEPLOY.md).
+  # No-op once any user exists. A failure is logged loudly but doesn't stop the app from starting.
+  node dist/scripts/bootstrap-admin.js || echo "WARNING: bootstrap-admin failed; see the error above" >&2
+fi
 exec "$@"

@@ -43,3 +43,23 @@ export async function upsertAdmin(
     return { user: updated, created: !existing, workspace };
   });
 }
+
+/**
+ * Creates the first admin on an empty database (BOOTSTRAP_ADMIN_* on a platform without a shell for
+ * `npm run create-admin`). Does nothing once any user exists, so restarts never reset a password or
+ * re-promote anyone; two replicas racing on a fresh database end with one admin (the unique email
+ * makes the loser fail, which counts as "already there").
+ */
+export async function bootstrapFirstAdmin(
+  db: PrismaClient,
+  input: { email: string; name: string; password: string; workspaceName?: string },
+): Promise<{ status: 'created'; user: User; workspace: Workspace } | { status: 'skipped' }> {
+  if ((await db.user.count()) > 0) return { status: 'skipped' };
+  try {
+    const { user, workspace } = await upsertAdmin(db, input);
+    return { status: 'created', user, workspace };
+  } catch (err) {
+    if ((err as { code?: string }).code === 'P2002' && (await db.user.count()) > 0) return { status: 'skipped' };
+    throw err;
+  }
+}
