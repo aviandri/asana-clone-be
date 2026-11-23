@@ -60,9 +60,10 @@ const EnvSchema = z.object({
   S3_BUCKET: optionalString(z.string()),
   S3_ACCESS_KEY_ID: optionalString(z.string()),
   S3_SECRET_ACCESS_KEY: optionalString(z.string()),
-  /** S3-compatible endpoint, e.g. https://oss-ap-southeast-5.aliyuncs.com for Alibaba OSS; unset = AWS. */
+  /** S3-compatible endpoint, e.g. https://s3.oss-ap-southeast-5.aliyuncs.com for Alibaba OSS; unset = AWS. */
   S3_ENDPOINT: optionalString(z.string().url()),
-  S3_REGION: optionalString(z.string()).transform((v) => v ?? 'us-east-1'),
+  /** SigV4 signing region. Required with S3_ENDPOINT (OSS: `ap-southeast-5`, no `oss-` prefix); AWS default us-east-1. */
+  S3_REGION: optionalString(z.string()),
   /** Path-style URLs (MinIO); OSS needs virtual-hosted style, the default. */
   S3_FORCE_PATH_STYLE: envBool(false),
   /** Prepended to every object key, e.g. `attachments/` (a trailing `/` is added if missing). */
@@ -98,6 +99,11 @@ const EnvSchema = z.object({
   .refine((c) => c.STORAGE_DRIVER !== 's3' || (c.S3_BUCKET && c.S3_ACCESS_KEY_ID && c.S3_SECRET_ACCESS_KEY), {
     message: 'STORAGE_DRIVER=s3 needs S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY',
     path: ['STORAGE_DRIVER'],
+  })
+  // A wrong signing region fails every request with 403 SignatureDoesNotMatch; don't guess it for non-AWS endpoints.
+  .refine((c) => c.STORAGE_DRIVER !== 's3' || !c.S3_ENDPOINT || c.S3_REGION, {
+    message: 'S3_ENDPOINT needs S3_REGION (the signing region, e.g. ap-southeast-5 for Alibaba OSS Jakarta)',
+    path: ['S3_REGION'],
   })
   .refine((c) => !(c.NODE_ENV === 'production' && c.LINK_PREVIEW_ALLOW_PRIVATE), {
   message: 'must not be set in production (it lets link previews reach the internal network)',

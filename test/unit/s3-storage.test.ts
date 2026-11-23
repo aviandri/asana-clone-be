@@ -260,20 +260,28 @@ describe('config: STORAGE_DRIVER=s3', () => {
   it('parses the optional settings with defaults', () => {
     const s3Env = { ...base, STORAGE_DRIVER: 's3', S3_BUCKET: 'b', S3_ACCESS_KEY_ID: 'k', S3_SECRET_ACCESS_KEY: 's' };
     const minimal = loadConfig({ ...s3Env, S3_ENDPOINT: '' });
-    expect(minimal).toMatchObject({ S3_REGION: 'us-east-1', S3_FORCE_PATH_STYLE: false, S3_PREFIX: '', S3_ENDPOINT: undefined });
+    expect(minimal).toMatchObject({ S3_FORCE_PATH_STYLE: false, S3_PREFIX: '' });
+    expect(minimal.S3_ENDPOINT).toBeUndefined();
+    expect(minimal.S3_REGION).toBeUndefined(); // the driver signs for us-east-1 (AWS)
     const full = loadConfig({
       ...s3Env,
-      S3_ENDPOINT: 'https://oss-ap-southeast-5.aliyuncs.com',
+      S3_ENDPOINT: 'https://s3.oss-ap-southeast-5.aliyuncs.com',
       S3_REGION: 'ap-southeast-5',
       S3_FORCE_PATH_STYLE: 'true',
       S3_PREFIX: '/attachments',
     });
     expect(full).toMatchObject({
-      S3_ENDPOINT: 'https://oss-ap-southeast-5.aliyuncs.com',
+      S3_ENDPOINT: 'https://s3.oss-ap-southeast-5.aliyuncs.com',
       S3_REGION: 'ap-southeast-5',
       S3_FORCE_PATH_STYLE: true,
       S3_PREFIX: 'attachments/',
     });
     expect(() => loadConfig({ ...s3Env, S3_ENDPOINT: 'not a url' })).toThrow('S3_ENDPOINT');
+  });
+
+  it('requires S3_REGION with a custom endpoint (a guessed region fails every signature)', () => {
+    const s3Env = { ...base, STORAGE_DRIVER: 's3', S3_BUCKET: 'b', S3_ACCESS_KEY_ID: 'k', S3_SECRET_ACCESS_KEY: 's' };
+    expect(() => loadConfig({ ...s3Env, S3_ENDPOINT: 'https://s3.oss-ap-southeast-5.aliyuncs.com' })).toThrow('S3_REGION');
+    expect(() => loadConfig(s3Env)).not.toThrow(); // AWS: region defaults to us-east-1 in the driver
   });
 });

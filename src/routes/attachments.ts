@@ -2,7 +2,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import multipart, { type MultipartFile } from '@fastify/multipart';
 import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
+import { createWriteStream } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { z } from 'zod';
 import { AppError, forbidden, notFound, validation } from '../errors.js';
 import {
@@ -150,7 +155,7 @@ export default async function attachmentRoutes(app: FastifyInstance) {
       const mimeType = await sniffMimeType(head, name);
       let image = null;
       if (isRasterImage(mimeType)) {
-        image = await processImage(storage.localPath ? storage.localPath(key) : await readAll(storage, key));
+        image = await withLocalFile(storage, key, processImage);
         if (image) {
           for (const [variant, bytes] of [['s', image.thumbnails.small], ['l', image.thumbnails.large]] as const) {
             const thumbKey = derivedKey(key, variant);
@@ -509,9 +514,18 @@ export default async function attachmentRoutes(app: FastifyInstance) {
   });
 }
 
-/** For drivers without local files: the whole object in memory (images only, ≤ MAX_UPLOAD_BYTES). */
-async function readAll(storage: StorageDriver, key: string): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of storage.get(key)) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks);
+/**
+ * Runs `fn` on a local file holding the object: the driver's own file (disk), else a temp copy that is
+ * removed afterwards (s3). sharp then reads from disk instead of a buffer of up to MAX_UPLOAD_BYTES.
+ */
+async function withLocalFile<T>(storage: StorageDriver, key: string, fn: (path: string) => Promise<T>): Promise<T> {
+  if (storage.localPath) return fn(storage.localPath(key));
+  const dir = await mkdtemp(join(tmpdir(), 'mp-image-'));
+  try {
+    const path = join(dir, 'original');
+    await pipeline(storage.get(key), createWriteStream(path, { flags: 'wx' }));
+    return await fn(path);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }
