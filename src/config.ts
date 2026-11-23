@@ -22,6 +22,10 @@ const envBool = (fallback: boolean) =>
     .default(fallback ? 'true' : 'false')
     .transform((v) => v === 'true' || v === '1');
 
+/** Unset or empty: deploy platforms often pass `VAR=` for "not set". */
+const optionalString = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (v === '' ? undefined : v), schema.optional());
+
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DATABASE_URL: z.string().min(1),
@@ -48,10 +52,24 @@ const EnvSchema = z.object({
     .refine(isValidTimeZone, 'APP_TIMEZONE must be an IANA time zone, e.g. Asia/Jakarta'),
   /** Name of the workspace `create-admin` and `seed` create when none exists (SPEC §12). */
   DEFAULT_WORKSPACE_NAME: z.string().trim().min(1).max(100).default('Mekari'),
-  /** Attachments (SPEC §13): only `disk` in v1.3; `s3` is a later drop-in. */
-  STORAGE_DRIVER: z.enum(['disk']).default('disk'),
+  /** Attachments (SPEC §13): `disk` (STORAGE_DIR) or `s3` (any S3-compatible bucket: AWS S3, Alibaba OSS, MinIO). */
+  STORAGE_DRIVER: z.enum(['disk', 's3']).default('disk'),
   /** Where the disk driver keeps files (`/data/attachments` in docker, on the `attachments` volume). */
   STORAGE_DIR: z.string().min(1).default('./data/attachments'),
+  /** `s3` driver: bucket and credentials (required with STORAGE_DRIVER=s3). */
+  S3_BUCKET: optionalString(z.string()),
+  S3_ACCESS_KEY_ID: optionalString(z.string()),
+  S3_SECRET_ACCESS_KEY: optionalString(z.string()),
+  /** S3-compatible endpoint, e.g. https://s3.oss-ap-southeast-5.aliyuncs.com for Alibaba OSS; unset = AWS. */
+  S3_ENDPOINT: optionalString(z.string().url()),
+  /** SigV4 signing region. Required with S3_ENDPOINT (OSS: `ap-southeast-5`, no `oss-` prefix); AWS default us-east-1. */
+  S3_REGION: optionalString(z.string()),
+  /** Path-style URLs (MinIO); OSS needs virtual-hosted style, the default. */
+  S3_FORCE_PATH_STYLE: envBool(false),
+  /** Prepended to every object key, e.g. `attachments/` (a trailing `/` is added if missing). */
+  S3_PREFIX: optionalString(z.string())
+    .transform((v) => (v ?? '').replace(/^\/+/, ''))
+    .transform((v) => (v && !v.endsWith('/') ? `${v}/` : v)),
   /** Per-file upload limit in bytes (SPEC §13 A1: 100 MB = 104,857,600). */
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(104_857_600),
   /** Uploads (files and links) per user per 10 minutes. */
@@ -77,6 +95,15 @@ const EnvSchema = z.object({
   .refine((c) => !c.MCP_ENABLED || isSecureOrLocal(c.APP_URL, c.NODE_ENV === 'production'), {
     message: 'MCP_ENABLED needs an https APP_URL (http only for localhost / 127.0.0.1, and not in production)',
     path: ['APP_URL'],
+  })
+  .refine((c) => c.STORAGE_DRIVER !== 's3' || (c.S3_BUCKET && c.S3_ACCESS_KEY_ID && c.S3_SECRET_ACCESS_KEY), {
+    message: 'STORAGE_DRIVER=s3 needs S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY',
+    path: ['STORAGE_DRIVER'],
+  })
+  // A wrong signing region fails every request with 403 SignatureDoesNotMatch; don't guess it for non-AWS endpoints.
+  .refine((c) => c.STORAGE_DRIVER !== 's3' || !c.S3_ENDPOINT || c.S3_REGION, {
+    message: 'S3_ENDPOINT needs S3_REGION (the signing region, e.g. ap-southeast-5 for Alibaba OSS Jakarta)',
+    path: ['S3_REGION'],
   })
   .refine((c) => !(c.NODE_ENV === 'production' && c.LINK_PREVIEW_ALLOW_PRIVATE), {
   message: 'must not be set in production (it lets link previews reach the internal network)',

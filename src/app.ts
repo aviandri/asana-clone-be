@@ -27,6 +27,7 @@ import { APP_VERSION } from './version.js';
 import oauthRoutes, { oauthRequestRoutes, sweepOAuth } from './routes/oauth.js';
 import { sweepAttachments } from './lib/attachments.js';
 import { DiskStorage, type StorageDriver } from './lib/storage.js';
+import { S3Storage } from './lib/s3-storage.js';
 import { defaultPolicy, permissivePolicy, type FetchPolicy } from './lib/link-preview.js';
 
 export type AppOptions = {
@@ -46,7 +47,16 @@ export type AppOptions = {
     Partial<
       Pick<
         Config,
-        'REQUEST_TIMEOUT_MS' | 'LINK_PREVIEW_ENABLED' | 'LINK_PREVIEW_ALLOW_PRIVATE' | 'TRUST_PROXY_HOPS' | 'MCP_ENABLED' | 'OAUTH_REGISTER_RATE_LIMIT' | 'OAUTH_AUTHORIZE_RATE_LIMIT'
+        | 'REQUEST_TIMEOUT_MS'
+        | 'STORAGE_DRIVER'
+        | 'S3_BUCKET'
+        | 'S3_ACCESS_KEY_ID'
+        | 'S3_SECRET_ACCESS_KEY'
+        | 'S3_ENDPOINT'
+        | 'S3_REGION'
+        | 'S3_FORCE_PATH_STYLE'
+        | 'S3_PREFIX'
+        | 'LINK_PREVIEW_ENABLED' | 'LINK_PREVIEW_ALLOW_PRIVATE' | 'TRUST_PROXY_HOPS' | 'MCP_ENABLED' | 'OAUTH_REGISTER_RATE_LIMIT' | 'OAUTH_AUTHORIZE_RATE_LIMIT'
       >
     >;
   /** The link-preview fetcher's network policy (tests); default from LINK_PREVIEW_ALLOW_PRIVATE. */
@@ -54,7 +64,7 @@ export type AppOptions = {
   prisma?: PrismaClient;
   /** true/false, or Fastify logger options (tests capture log lines with a stream). */
   logger?: boolean | Exclude<FastifyServerOptions['logger'], undefined>;
-  /** Attachment storage; default: the disk driver under STORAGE_DIR. */
+  /** Attachment storage; default: from STORAGE_DRIVER (disk under STORAGE_DIR, or the S3 bucket). */
   storage?: StorageDriver;
   /** The hourly attachment sweeper (SPEC §13); default on, except under NODE_ENV=test. */
   sweeper?: boolean;
@@ -98,6 +108,22 @@ function loggerOptions(logger: AppOptions['logger'], env: string): FastifyServer
   };
 }
 
+function storageFromConfig(c: AppOptions['config']): StorageDriver {
+  if (c.STORAGE_DRIVER !== 's3') return new DiskStorage(c.STORAGE_DIR);
+  if (!c.S3_BUCKET || !c.S3_ACCESS_KEY_ID || !c.S3_SECRET_ACCESS_KEY) {
+    throw new Error('STORAGE_DRIVER=s3 needs S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY');
+  }
+  return S3Storage.fromSettings({
+    bucket: c.S3_BUCKET,
+    accessKeyId: c.S3_ACCESS_KEY_ID,
+    secretAccessKey: c.S3_SECRET_ACCESS_KEY,
+    endpoint: c.S3_ENDPOINT,
+    region: c.S3_REGION,
+    forcePathStyle: c.S3_FORCE_PATH_STYLE,
+    prefix: c.S3_PREFIX,
+  });
+}
+
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: loggerOptions(opts.logger, opts.config.NODE_ENV),
@@ -109,7 +135,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   });
 
   app.decorate('config', opts.config);
-  app.decorate('storage', opts.storage ?? new DiskStorage(opts.config.STORAGE_DIR));
+  app.decorate('storage', opts.storage ?? storageFromConfig(opts.config));
   app.decorate(
     'fetchPolicy',
     opts.fetchPolicy ?? (opts.config.LINK_PREVIEW_ALLOW_PRIVATE ? permissivePolicy : defaultPolicy),

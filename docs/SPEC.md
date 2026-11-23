@@ -610,8 +610,9 @@ Attachment  id, workspaceId, taskId (cascade), commentId? (cascade), uploaderId 
 - `StorageDriver` interface: `put(key, stream) → {size, sha256}`, `get(key, range?) → stream`,
   `delete(key)`, `stat(key)`. **`STORAGE_DRIVER=disk`** (default) writes under
   **`STORAGE_DIR`** (default `./data/attachments` in dev, `/data/attachments` in docker, a named
-  volume **`attachments`**, backed up alongside `pgdata`). An `s3` driver (S3/R2/MinIO, env
-  `S3_*`) is a later drop-in, no API change.
+  volume **`attachments`**, backed up alongside `pgdata`). **`STORAGE_DRIVER=s3`** stores objects
+  in an S3-compatible bucket instead (Alibaba OSS, AWS S3, MinIO; env `S3_*`, see the BE README), with
+  no API change.
 - Keys are random (`ab/cd/<uuid>`), never derived from the filename. Writes go to a temp file then
   rename, so a half-upload is never visible. Files are deleted **after** the DB commit that removes
   their row(s) (task/comment/attachment delete, cascades included); a **sweeper** (hourly, in-process)
