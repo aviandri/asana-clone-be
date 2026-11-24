@@ -22,10 +22,10 @@ Platform facts this guide relies on (checked 2026-11-23, OneDeploy v2.21.0):
 
 ## 0. Once: mirror the repos to Bitbucket
 
-1. In the Mekari Bitbucket workspace, create empty repos `asana-clone-be` and `asana-clone-fe`.
+1. In the Mekari Bitbucket workspace, create empty repos `mekari-project-be` and `mekari-project-fe` (done: workspace `mid-kelola-indonesia`). Leave them empty: no README or .gitignore commit, or the first mirror push is rejected.
 2. Create a **repository access token** with *write* on each (Repository settings → Access tokens).
 3. In each GitHub repo (Settings → Secrets and variables → Actions), add:
-   - variable `BITBUCKET_REPO` = `<workspace>/asana-clone-be` (or `-fe`)
+   - variable `BITBUCKET_REPO` = `mid-kelola-indonesia/mekari-project-be` (or `-fe`) (set 2026-11-24)
    - secret `BITBUCKET_TOKEN` = that repo's token
 4. Run the **Mirror to Bitbucket** workflow once by hand (Actions → Run workflow). After that, every
    push to `main` that passes CI is mirrored.
@@ -48,7 +48,7 @@ Project **Mekari Project** → **Deploy Service**:
 
 | Field | Value |
 |---|---|
-| Git Repository | `https://bitbucket.org/<workspace>/asana-clone-be` |
+| Git Repository | `https://bitbucket.org/mid-kelola-indonesia/mekari-project-be` |
 | Deploy from | Branch `main` |
 | Application Name | `mekari-project-be` (namespaces become `sandbox-` / `production-mekari-project-be`) |
 | Subdomain Production | `project-api` + `.mekari.io` |
@@ -89,7 +89,7 @@ Environment variables (🔒 = toggle **Secret**):
 
 | Field | Value |
 |---|---|
-| Git Repository | `https://bitbucket.org/<workspace>/asana-clone-fe` |
+| Git Repository | `https://bitbucket.org/mid-kelola-indonesia/mekari-project-fe` |
 | Application Name | `mekari-project-fe` |
 | Subdomain Production | `project` + `.mekari.io` |
 | Application Port | `80` |
