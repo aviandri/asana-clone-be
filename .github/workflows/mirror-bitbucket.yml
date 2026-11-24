@@ -12,6 +12,11 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      force:
+        description: Overwrite Bitbucket main even if it has commits not on GitHub (e.g. an auto-created README)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,6 +35,7 @@ jobs:
     env:
       BITBUCKET_REPO: ${{ vars.BITBUCKET_REPO }}
       SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
     steps:
       - name: Check configuration
         id: cfg
@@ -57,5 +63,11 @@ jobs:
           if git fetch --quiet "$remote" main 2>/dev/null && git merge-base --is-ancestor "$SHA" FETCH_HEAD; then
             echo "Bitbucket main already contains $SHA"; exit 0
           fi
-          git push "$remote" "$SHA:refs/heads/main"
+          if [ "$FORCE" = "true" ]; then
+            old=$(git ls-remote "$remote" refs/heads/main | cut -f1)
+            echo "::warning::Force-pushing $SHA over Bitbucket main (was ${old:-empty})"
+            git push --force "$remote" "$SHA:refs/heads/main"
+          else
+            git push "$remote" "$SHA:refs/heads/main"
+          fi
           echo "Mirrored $SHA to bitbucket.org/${BITBUCKET_REPO} main"
